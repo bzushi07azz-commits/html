@@ -1,0 +1,209 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+<title>Cuenta regresiva</title>
+
+<style>
+    * {
+        box-sizing: border-box;
+        margin: 0;
+        padding: 0;
+        font-family: "Segoe UI", Arial, sans-serif;
+    }
+
+    body {
+        min-height: 100vh;
+        display: flex;
+        justify-content: center;
+        align-items: center;
+        background: linear-gradient(135deg, #111827, #1e3a8a);
+        color: white;
+    }
+
+    .container {
+        text-align: center;
+        background: rgba(255,255,255,0.12);
+        backdrop-filter: blur(15px);
+        padding: 40px;
+        border-radius: 25px;
+        box-shadow: 0 20px 50px rgba(0,0,0,.4);
+        width: 90%;
+        max-width: 800px;
+    }
+
+    h1 {
+        font-size: 3rem;
+        margin-bottom: 10px;
+    }
+
+    .subtitle {
+        font-size: 1.2rem;
+        opacity: .8;
+        margin-bottom: 35px;
+    }
+
+    .timer {
+        display: grid;
+        grid-template-columns: repeat(4,1fr);
+        gap: 20px;
+    }
+
+    .box {
+        background: rgba(255,255,255,.15);
+        border-radius: 18px;
+        padding: 25px 10px;
+        transition: .3s;
+    }
+
+    .box:hover {
+        transform: translateY(-8px);
+        background: rgba(255,255,255,.25);
+    }
+
+    .number {
+        font-size: 3.5rem;
+        font-weight: bold;
+    }
+
+    .label {
+        margin-top: 10px;
+        font-size: 1rem;
+        text-transform: uppercase;
+        opacity: .8;
+    }
+
+    .date {
+        margin-top: 35px;
+        font-size: 1.1rem;
+    }
+
+    .finished {
+        font-size: 2rem;
+        color: #86efac;
+        display: none;
+    }
+
+    @media(max-width:600px){
+        .timer {
+            grid-template-columns: repeat(2,1fr);
+        }
+
+        h1 {
+            font-size: 2rem;
+        }
+
+        .number {
+            font-size: 2.5rem;
+        }
+    }
+</style>
+
+</head>
+
+<body>
+
+<div class="container">
+
+    <h1>Cuenta regresiva</h1>
+
+    <p class="subtitle">
+        Tiempo restante hasta el 1 de diciembre a las 12:30 PM
+    </p>
+
+    <div class="timer">
+
+        <div class="box">
+            <div class="number" id="days">0</div>
+            <div class="label">Días</div>
+        </div>
+
+        <div class="box">
+            <div class="number" id="hours">0</div>
+            <div class="label">Horas</div>
+        </div>
+
+        <div class="box">
+            <div class="number" id="minutes">0</div>
+            <div class="label">Minutos</div>
+        </div>
+
+        <div class="box">
+            <div class="number" id="seconds">0</div>
+            <div class="label">Segundos</div>
+        </div>
+
+    </div>
+
+    <div class="date">
+        Finaliza: 1 de diciembre - 12:30:00 (Argentina)
+    </div>
+
+    <div class="finished" id="finished">
+        ¡El tiempo terminó!
+    </div>
+
+</div>
+
+
+<script>
+
+    // Fecha objetivo: 1 de diciembre a las 12:30 Argentina (UTC-3)
+    const targetDate = new Date("2026-12-01T12:30:00-03:00").getTime();
+
+
+    function updateTimer(){
+
+        const now = new Date().getTime();
+
+        const difference = targetDate - now;
+
+
+        if(difference <= 0){
+
+            document.querySelector(".timer").style.display="none";
+            document.querySelector(".date").style.display="none";
+            document.getElementById("finished").style.display="block";
+
+            return;
+        }
+
+
+        const days = Math.floor(
+            difference / (1000 * 60 * 60 * 24)
+        );
+
+        const hours = Math.floor(
+            (difference % (1000 * 60 * 60 * 24)) /
+            (1000 * 60 * 60)
+        );
+
+        const minutes = Math.floor(
+            (difference % (1000 * 60 * 60)) /
+            (1000 * 60)
+        );
+
+        const seconds = Math.floor(
+            (difference % (1000 * 60)) /
+            1000
+        );
+
+
+        document.getElementById("days").textContent = days;
+        document.getElementById("hours").textContent = hours;
+        document.getElementById("minutes").textContent = minutes;
+        document.getElementById("seconds").textContent = seconds;
+
+    }
+
+
+    updateTimer();
+
+    setInterval(updateTimer,1000);
+
+</script>
+
+</body>
+</html>
