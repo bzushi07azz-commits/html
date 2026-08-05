@@ -1,0 +1,378 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+<title>Cuenta regresiva futura</title>
+
+<style>
+
+*{
+box-sizing:border-box;
+font-family:"Segoe UI",Arial,sans-serif;
+}
+
+body{
+margin:0;
+padding:30px;
+min-height:100vh;
+background:linear-gradient(135deg,#111827,#2563eb);
+color:white;
+}
+
+h1{
+text-align:center;
+font-size:45px;
+}
+
+.container{
+max-width:1200px;
+margin:auto;
+display:grid;
+gap:25px;
+}
+
+.card{
+background:rgba(255,255,255,.12);
+backdrop-filter:blur(15px);
+padding:25px;
+border-radius:25px;
+box-shadow:0 15px 40px rgba(0,0,0,.4);
+}
+
+.title{
+font-size:26px;
+font-weight:bold;
+text-align:center;
+}
+
+.date{
+text-align:center;
+opacity:.8;
+margin:10px;
+}
+
+.timer{
+display:grid;
+grid-template-columns:repeat(4,1fr);
+gap:15px;
+}
+
+.box{
+background:rgba(255,255,255,.15);
+padding:20px;
+border-radius:15px;
+text-align:center;
+}
+
+.number{
+font-size:40px;
+font-weight:bold;
+}
+
+.label{
+opacity:.8;
+}
+
+.finished{
+text-align:center;
+font-size:25px;
+color:#86efac;
+}
+
+
+@media(max-width:700px){
+
+.timer{
+grid-template-columns:repeat(2,1fr);
+}
+
+h1{
+font-size:30px;
+}
+
+}
+
+</style>
+
+</head>
+
+
+<body>
+
+
+<h1>⏳ Mis cuentas regresivas</h1>
+
+
+<div class="container" id="container"></div>
+
+
+
+<script>
+
+
+const eventos=[
+
+
+{
+nombre:"🍂 13 de noviembre",
+fecha:"2026-11-13T00:00:00-03:00"
+},
+
+{
+nombre:"🎯 Evento principal",
+fecha:"2026-12-01T12:30:00-03:00"
+},
+
+{
+nombre:"🎄 Navidad",
+fecha:"2026-12-25T00:00:00-03:00"
+},
+
+{
+nombre:"🎁 27 de diciembre",
+fecha:"2026-12-27T00:00:00-03:00"
+},
+
+{
+nombre:"🎆 Año nuevo",
+fecha:"2027-01-01T00:00:00-03:00"
+},
+
+
+{
+nombre:"💙 1 de febrero",
+mes:2,
+dia:1,
+anual:true
+},
+
+{
+nombre:"❤️ 14 de febrero",
+mes:2,
+dia:14,
+anual:true
+},
+
+{
+nombre:"🌸 8 de abril",
+mes:4,
+dia:8,
+anual:true
+},
+
+{
+nombre:"🇦🇷 13 de junio",
+mes:6,
+dia:13,
+anual:true
+},
+
+{
+nombre:"❄️ 20 de junio",
+mes:6,
+dia:20,
+anual:true
+},
+
+{
+nombre:"🌙 21 de agosto",
+mes:8,
+dia:21,
+anual:true
+},
+
+
+{
+nombre:"🏆 Mundial 2030",
+fecha:"2030-06-13T00:00:00-03:00"
+}
+
+
+];
+
+
+
+function obtenerFecha(evento){
+
+if(evento.anual){
+
+let ahora=new Date();
+let año=ahora.getFullYear();
+
+let fecha=new Date(
+`${año}-${String(evento.mes).padStart(2,"0")}-${String(evento.dia).padStart(2,"0")}T00:00:00-03:00`
+);
+
+
+if(fecha<ahora){
+
+fecha=new Date(
+`${año+1}-${String(evento.mes).padStart(2,"0")}-${String(evento.dia).padStart(2,"0")}T00:00:00-03:00`
+);
+
+}
+
+return fecha;
+
+}
+
+
+return new Date(evento.fecha);
+
+}
+
+
+
+
+function dibujar(){
+
+const container=document.getElementById("container");
+
+container.innerHTML="";
+
+
+eventos.sort((a,b)=>{
+
+return obtenerFecha(a)-obtenerFecha(b);
+
+});
+
+
+
+eventos.forEach((evento,index)=>{
+
+
+container.innerHTML+=`
+
+<div class="card">
+
+<div class="title">
+${evento.nombre}
+</div>
+
+
+<div class="date" id="date${index}">
+</div>
+
+
+<div class="timer" id="timer${index}">
+
+
+<div class="box">
+<div class="number" id="d${index}">0</div>
+<div class="label">Días</div>
+</div>
+
+
+<div class="box">
+<div class="number" id="h${index}">0</div>
+<div class="label">Horas</div>
+</div>
+
+
+<div class="box">
+<div class="number" id="m${index}">0</div>
+<div class="label">Minutos</div>
+</div>
+
+
+<div class="box">
+<div class="number" id="s${index}">0</div>
+<div class="label">Segundos</div>
+</div>
+
+
+</div>
+
+</div>
+
+`;
+
+});
+
+
+}
+
+
+
+function actualizar(){
+
+
+let ahora=new Date();
+
+
+eventos.sort((a,b)=>obtenerFecha(a)-obtenerFecha(b));
+
+
+eventos.forEach((evento,index)=>{
+
+
+let fecha=obtenerFecha(evento);
+
+let diferencia=fecha-ahora;
+
+
+let date=document.getElementById("date"+index);
+
+
+if(!date)return;
+
+
+date.innerHTML=
+fecha.toLocaleString("es-AR",
+{
+dateStyle:"full",
+timeStyle:"short"
+});
+
+
+
+if(diferencia<=0){
+
+document.getElementById("timer"+index).innerHTML=
+"<div class='finished'>🎉 Finalizado</div>";
+
+return;
+
+}
+
+
+let dias=Math.floor(diferencia/(1000*60*60*24));
+
+let horas=Math.floor(
+diferencia%(1000*60*60*24)/(1000*60*60)
+);
+
+let minutos=Math.floor(
+diferencia%(1000*60*60)/(1000*60)
+);
+
+let segundos=Math.floor(
+diferencia%(1000*60)/1000
+);
+
+
+document.getElementById("d"+index).innerHTML=dias;
+document.getElementById("h"+index).innerHTML=horas;
+document.getElementById("m"+index).innerHTML=minutos;
+document.getElementById("s"+index).innerHTML=segundos;
+
+
+});
+
+}
+
+
+dibujar();
+
+setInterval(actualizar,1000);
+
+
+</script>
+
+
+</body>
+</html>
