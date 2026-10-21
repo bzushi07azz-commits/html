@@ -54,6 +54,72 @@
   .keys{display:flex;gap:8px;flex-wrap:wrap;justify-content:center;margin-top:2px}
   .key{font-size:11px;letter-spacing:.08em;padding:5px 10px;border-radius:7px;
        border:1px solid rgba(75,225,255,.32);color:#9adcff;background:rgba(75,225,255,.07)}
+
+  /* =========================================================
+     CONTROLES TÁCTILES (ANDROID)
+     ========================================================= */
+  #touchControls{
+    position:absolute;inset:0;z-index:6;
+    pointer-events:none;display:none;
+  }
+  html.touch #touchControls.on{display:block}
+
+  /* --- Joystick --- */
+  #joyZone{
+    position:absolute;left:8px;bottom:8px;
+    width:154px;height:154px;
+    display:flex;align-items:center;justify-content:center;
+    pointer-events:auto;touch-action:none;
+  }
+  #joyBase{
+    width:114px;height:114px;border-radius:50%;
+    border:2px solid rgba(75,225,255,.32);
+    background:radial-gradient(circle at 50% 50%,rgba(75,225,255,.12),rgba(75,225,255,.03) 72%,transparent);
+    box-shadow:0 0 26px rgba(75,225,255,.22),inset 0 0 30px rgba(75,225,255,.10);
+    display:flex;align-items:center;justify-content:center;
+  }
+  #joyKnob{
+    width:54px;height:54px;border-radius:50%;
+    background:radial-gradient(circle at 34% 28%,#e6feff,#2ec2ff 62%,#0e6da6);
+    box-shadow:0 0 20px rgba(75,225,255,.85),inset 0 -3px 6px rgba(0,0,0,.35);
+    will-change:transform;pointer-events:none;
+  }
+
+  /* --- Botones de acción --- */
+  #actionBtns{
+    position:absolute;right:12px;bottom:24px;
+    display:flex;flex-direction:column;align-items:center;gap:16px;
+    pointer-events:none;
+  }
+  .tbtn{
+    position:relative;pointer-events:auto;
+    display:flex;align-items:center;justify-content:center;
+    border-radius:50%;font:inherit;font-weight:800;cursor:pointer;
+    touch-action:none;-webkit-user-select:none;user-select:none;
+    transition:transform .1s ease,opacity .15s ease;
+  }
+  .tbtn:active{transform:scale(.92)}
+  #btnBombTouch{
+    width:78px;height:78px;font-size:30px;line-height:1;
+    color:#ffd166;border:2px solid rgba(255,209,102,.55);
+    background:radial-gradient(circle at 35% 30%,rgba(255,209,102,.28),rgba(255,209,102,.08));
+    box-shadow:0 0 24px rgba(255,209,102,.35);
+    text-shadow:0 0 14px rgba(255,209,102,.9);
+  }
+  #btnBombTouch.empty{opacity:.32}
+  #bombCount{
+    position:absolute;top:-3px;right:-3px;
+    min-width:23px;height:23px;padding:0 5px;border-radius:12px;
+    background:#ff4bd8;color:#fff;font-size:12px;line-height:23px;
+    text-align:center;letter-spacing:0;
+    box-shadow:0 0 12px rgba(255,75,216,.85);
+  }
+  #btnPauseTouch{
+    width:50px;height:50px;font-size:14px;letter-spacing:.06em;
+    color:#9adcff;border:2px solid rgba(75,225,255,.45);
+    background:rgba(75,225,255,.08);
+    box-shadow:0 0 18px rgba(75,225,255,.25);
+  }
 </style>
 </head>
 <body>
@@ -87,6 +153,17 @@
     <p class="stat">PUNTUACIÓN: <span id="overScore">0</span></p>
     <p class="stat">RÉCORD: <span id="overBest">0</span></p>
     <button class="btn" id="btnRetry">↻ REINTENTAR</button>
+  </div>
+
+  <!-- CONTROLES TÁCTILES (solo dispositivos táctiles) -->
+  <div id="touchControls">
+    <div id="joyZone">
+      <div id="joyBase"><div id="joyKnob"></div></div>
+    </div>
+    <div id="actionBtns">
+      <button class="tbtn" id="btnBombTouch" aria-label="Bomba">💣<span id="bombCount">3</span></button>
+      <button class="tbtn" id="btnPauseTouch" aria-label="Pausa">❚❚</button>
+    </div>
   </div>
 </div>
 
@@ -200,7 +277,7 @@ const ENEMY_DEFS = {
 };
 
 /* =========================================================
-   6. ENTRADA (teclado + puntero)
+   6. ENTRADA (teclado + puntero + táctil Android)
    ========================================================= */
 const keys = Object.create(null);
 const pointer = { x: W/2, y: H-140, down: false, active: false };
@@ -236,6 +313,104 @@ canvas.addEventListener('pointerdown', e => {
 canvas.addEventListener('pointermove', e => { if(pointer.down) toLogical(e); });
 window.addEventListener('pointerup',     () => { pointer.down = false; pointer.active = false; });
 window.addEventListener('pointercancel', () => { pointer.down = false; pointer.active = false; });
+
+/* =========================================================
+   6-bis. CONTROLES TÁCTILES ANDROID (joystick + botones)
+   ========================================================= */
+const isTouch = ('ontouchstart' in window) || (navigator.maxTouchPoints > 0);
+if(isTouch) document.documentElement.classList.add('touch');
+
+const touchUI     = document.getElementById('touchControls');
+const joyZone     = document.getElementById('joyZone');
+const joyBase     = document.getElementById('joyBase');
+const joyKnob     = document.getElementById('joyKnob');
+const btnBombT    = document.getElementById('btnBombTouch');
+const bombCountEl = document.getElementById('bombCount');
+const btnPauseT   = document.getElementById('btnPauseTouch');
+
+// Estado del joystick: dx/dy normalizados (-1..1)
+const joy = { active:false, id:null, dx:0, dy:0, cx:0, cy:0, max:48 };
+
+function joyReset(){
+  joy.active = false;
+  joy.id = null;
+  joy.dx = 0;
+  joy.dy = 0;
+  joyKnob.style.transform = 'translate(0px,0px)';
+}
+
+function joyCenter(){
+  const r = joyBase.getBoundingClientRect();
+  joy.cx = r.left + r.width  / 2;
+  joy.cy = r.top  + r.height / 2;
+  joy.max = r.width * 0.42;
+}
+
+function joyUpdate(e){
+  let dx = e.clientX - joy.cx;
+  let dy = e.clientY - joy.cy;
+  const d = Math.hypot(dx, dy);
+  if(d > joy.max){ dx = dx / d * joy.max; dy = dy / d * joy.max; }
+  joyKnob.style.transform = `translate(${dx}px,${dy}px)`;
+
+  const dead = 0.22;                       // zona muerta
+  let nx = dx / joy.max, ny = dy / joy.max;
+  if(Math.hypot(nx, ny) < dead){ nx = 0; ny = 0; }
+  joy.dx = nx;
+  joy.dy = ny;
+}
+
+joyZone.addEventListener('pointerdown', e => {
+  e.preventDefault();
+  ensureAudio();
+  joyCenter();
+  joy.active = true;
+  joy.id = e.pointerId;
+  try { joyZone.setPointerCapture(e.pointerId); } catch(err){}
+  joyUpdate(e);
+});
+joyZone.addEventListener('pointermove', e => {
+  if(!joy.active || e.pointerId !== joy.id) return;
+  e.preventDefault();
+  joyUpdate(e);
+});
+['pointerup','pointercancel','pointerleave'].forEach(evt => {
+  joyZone.addEventListener(evt, e => {
+    if(e.pointerId !== joy.id) return;
+    joyReset();
+  });
+});
+
+// Botón de bomba
+btnBombT.addEventListener('pointerdown', e => {
+  e.preventDefault();
+  ensureAudio();
+  useBomb();
+});
+
+// Botón de pausa
+btnPauseT.addEventListener('pointerdown', e => {
+  e.preventDefault();
+  ensureAudio();
+  togglePause();
+});
+
+// Mostrar / ocultar los controles según el estado del juego
+function setTouchUI(on){
+  if(!isTouch) return;
+  touchUI.classList.toggle('on', !!on);
+  if(!on) joyReset();
+}
+
+// Sincroniza el contador de bombas del botón (solo si cambia)
+let lastBombsShown = -1;
+function syncBombCount(){
+  const n = player ? player.bombs : 0;
+  if(n === lastBombsShown) return;
+  lastBombsShown = n;
+  bombCountEl.textContent = n;
+  btnBombT.classList.toggle('empty', n <= 0);
+}
 
 /* =========================================================
    7. FONDO: ESTRELLAS Y NEBULOSAS
@@ -334,8 +509,13 @@ function updatePlayer(dt){
   if(keys['ArrowUp']    || keys['KeyW']) dy -= 1;
   if(keys['ArrowDown']  || keys['KeyS']) dy += 1;
 
+  // ---- NUEVO: joystick táctil (Android) tiene prioridad ----
+  if(joy.active && (joy.dx || joy.dy)){
+    dx = joy.dx;
+    dy = joy.dy;
+  }
   // Control táctil / ratón: la nave sigue al puntero
-  if(pointer.active){
+  else if(pointer.active){
     const tx = pointer.x, ty = pointer.y - 46;
     dx = clamp((tx - p.x) / 26, -1, 1);
     dy = clamp((ty - p.y) / 26, -1, 1);
@@ -1017,6 +1197,9 @@ function drawHUD(){
   }
 
   ctx.restore();
+
+  // Contador del botón táctil de bomba
+  syncBombCount();
 }
 
 function render(){
@@ -1117,8 +1300,10 @@ function startGame(){
 
   pointer.active = false;
   pointer.down = false;
+  joyReset();
 
   hideAll();
+  setTouchUI(true);          // ← muestra joystick y botones en Android
 }
 
 function gameOver(){
@@ -1131,6 +1316,7 @@ function gameOver(){
   document.getElementById('overBest').textContent  = game.best;
   document.getElementById('bestMenu').textContent  = game.best;
   elOver.classList.remove('hidden');
+  setTouchUI(false);         // ← oculta los controles táctiles
   explode(player.x, player.y, '#ff8a5c', 44, 2);
   game.shake = 24;
   noiseBurst(0.7, 0.25);
@@ -1140,9 +1326,11 @@ function togglePause(){
   if(game.state === 'playing'){
     game.state = 'paused';
     elPause.classList.remove('hidden');
+    setTouchUI(false);       // ← oculta los controles táctiles
   } else if(game.state === 'paused'){
     game.state = 'playing';
     elPause.classList.add('hidden');
+    setTouchUI(true);        // ← los vuelve a mostrar
   }
 }
 
@@ -1154,6 +1342,7 @@ document.getElementById('btnQuit').addEventListener('click', () => {
   elPause.classList.add('hidden');
   document.getElementById('bestMenu').textContent = game.best;
   elMenu.classList.remove('hidden');
+  setTouchUI(false);
 });
 
 document.addEventListener('visibilitychange', () => {
@@ -1171,4 +1360,4 @@ requestAnimationFrame(loop);
 })();
 </script>
 </body>
-</html>
+ </html>
