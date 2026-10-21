@@ -1359,5 +1359,596 @@ requestAnimationFrame(loop);
 
 })();
 </script>
+<!-- =========================================================
+     EXTRAS AÑADIDOS: AJUSTES, OPCIONES Y RÉCORDS
+     (No modifica el código original del juego)
+     ========================================================= -->
+<script>
+(function() {
+  'use strict';
+
+  /* ---------------------------------------------------------
+     1. AJUSTES PERSISTENTES
+     --------------------------------------------------------- */
+  const SETTINGS_KEY    = 'novaSettings';
+  const LEADERBOARD_KEY = 'novaLeaderboard';
+
+  const defaults = {
+    autoShoot: true,        // true = automático, false = manual
+    quality: 'high',        // 'low' | 'med' | 'high'
+    playerName: 'Jugador',
+    showFps: false
+  };
+
+  let settings = Object.assign({}, defaults);
+  try {
+    const saved = JSON.parse(localStorage.getItem(SETTINGS_KEY) || '{}');
+    settings = Object.assign({}, defaults, saved);
+  } catch (e) {}
+
+  function saveSettings() {
+    try { localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings)); } catch (e) {}
+  }
+
+  /* ---------------------------------------------------------
+     2. INYECCIÓN DE ESTILOS
+     --------------------------------------------------------- */
+  const styleEl = document.createElement('style');
+  styleEl.textContent = `
+    .menu-extras {
+      display: flex; gap: 10px; margin-top: 6px; flex-wrap: wrap; justify-content: center;
+    }
+    .btn-small {
+      font: inherit; font-weight: 700; letter-spacing: .1em; font-size: 11.5px;
+      padding: 9px 18px; border-radius: 999px; cursor: pointer;
+      border: 1px solid rgba(75,225,255,.4); color: #9adcff;
+      background: rgba(75,225,255,.08); transition: all .15s ease;
+    }
+    .btn-small:hover {
+      background: rgba(75,225,255,.18); border-color: rgba(75,225,255,.7);
+      box-shadow: 0 0 18px rgba(75,225,255,.35);
+    }
+    .btn-small:active { transform: scale(.96); }
+    .btn-small.danger {
+      border-color: rgba(255,107,157,.5); color: #ff8aa8;
+      background: rgba(255,107,157,.08);
+    }
+    .btn-small.danger:hover { background: rgba(255,107,157,.18); }
+
+    .panel-overlay {
+      position: absolute; inset: 0; z-index: 20;
+      display: flex; flex-direction: column; align-items: center; justify-content: center;
+      gap: 12px; padding: 22px;
+      background: rgba(4,4,14,.94);
+      backdrop-filter: blur(9px); -webkit-backdrop-filter: blur(9px);
+      border-radius: 12px; overflow-y: auto; line-height: 1.5;
+    }
+    .panel-overlay.hidden { display: none; }
+    .panel-title {
+      font-size: 20px; letter-spacing: .16em; font-weight: 800;
+      color: #4be1ff; text-shadow: 0 0 20px rgba(75,225,255,.7);
+      margin-bottom: 4px;
+    }
+    .panel-hint {
+      font-size: 10.5px; color: #7fa8c8; letter-spacing: .04em;
+      max-width: 340px; text-align: center; margin-bottom: 4px;
+    }
+    .setting-row {
+      display: flex; align-items: center; justify-content: space-between;
+      width: 100%; max-width: 340px; gap: 10px;
+      padding: 9px 13px; border-radius: 10px;
+      background: rgba(75,225,255,.05);
+      border: 1px solid rgba(75,225,255,.14);
+    }
+    .setting-label {
+      font-size: 11.5px; letter-spacing: .06em; color: #c8dcf0; flex: 1; text-align: left;
+    }
+    .toggle {
+      display: flex; border-radius: 999px; overflow: hidden;
+      border: 1px solid rgba(75,225,255,.3); flex-shrink: 0;
+    }
+    .toggle button {
+      font: inherit; font-size: 10px; font-weight: 700; letter-spacing: .06em;
+      padding: 6px 11px; border: none; cursor: pointer;
+      background: transparent; color: #7fd3ff; transition: all .15s ease;
+    }
+    .toggle button.active { background: #4be1ff; color: #04101a; }
+    .toggle button:hover:not(.active) { background: rgba(75,225,255,.15); }
+
+    .setting-input {
+      font: inherit; font-size: 12px; padding: 6px 11px;
+      border-radius: 8px; border: 1px solid rgba(75,225,255,.3);
+      background: rgba(0,0,0,.35); color: #e8f4ff; outline: none;
+      width: 130px; text-align: left;
+    }
+    .setting-input:focus { border-color: #4be1ff; box-shadow: 0 0 12px rgba(75,225,255,.35); }
+
+    .lb-table {
+      width: 100%; max-width: 380px; border-collapse: collapse; font-size: 12px;
+    }
+    .lb-table th {
+      text-align: left; padding: 7px 10px; color: #7fd3ff;
+      letter-spacing: .1em; font-size: 9.5px; text-transform: uppercase;
+      border-bottom: 1px solid rgba(75,225,255,.25);
+    }
+    .lb-table td {
+      padding: 7px 10px; border-bottom: 1px solid rgba(75,225,255,.08);
+      color: #c8dcf0; font-size: 11.5px;
+    }
+    .lb-table td.rank {
+      color: #ffd166; font-weight: 800; width: 28px; font-family: ui-monospace, monospace;
+    }
+    .lb-table td.score {
+      color: #4be1ff; font-weight: 800; text-align: right;
+      font-family: ui-monospace, monospace;
+    }
+    .lb-table td.name { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 140px; }
+    .lb-table tr.top1 td.rank { color: #ffd700; text-shadow: 0 0 8px rgba(255,215,0,.7); }
+    .lb-table tr.top2 td.rank { color: #d8d8d8; }
+    .lb-table tr.top3 td.rank { color: #cd7f32; }
+    .lb-empty { color: #8fa8c4; font-size: 12px; padding: 24px 0; text-align: center; width: 100%; }
+
+    /* Botón táctil de disparo (solo manual) */
+    #btnShootTouch { display: none; }
+    html.manual-shoot #btnShootTouch { display: flex; }
+    html.touch #btnShootTouch {
+      width: 78px; height: 78px; font-size: 26px; line-height: 1;
+      color: #4be1ff; border: 2px solid rgba(75,225,255,.55);
+      background: radial-gradient(circle at 35% 30%, rgba(75,225,255,.3), rgba(75,225,255,.08));
+      box-shadow: 0 0 24px rgba(75,225,255,.4);
+      text-shadow: 0 0 14px rgba(75,225,255,.9);
+    }
+    html.touch #btnShootTouch:active {
+      background: radial-gradient(circle at 35% 30%, rgba(75,225,255,.55), rgba(75,225,255,.2));
+      transform: scale(.92);
+    }
+
+    /* Contador FPS */
+    #novaFps {
+      position: absolute; top: 8px; left: 50%; transform: translateX(-50%);
+      font-family: ui-monospace, monospace; font-size: 10px;
+      color: #4be1ff; background: rgba(0,0,0,.65);
+      padding: 2px 8px; border-radius: 4px; z-index: 8;
+      pointer-events: none; letter-spacing: .05em;
+    }
+    #novaFps.hidden { display: none; }
+  `;
+  document.head.appendChild(styleEl);
+
+  /* ---------------------------------------------------------
+     3. REFERENCIAS DEL DOM
+     --------------------------------------------------------- */
+  const wrap     = document.getElementById('wrap');
+  const menuEl   = document.getElementById('menu');
+  const pauseEl  = document.getElementById('pause');
+  const overEl   = document.getElementById('over');
+  const overScoreEl = document.getElementById('overScore');
+  const touchUI  = document.getElementById('touchControls');
+  const actionBtns = document.getElementById('actionBtns');
+
+  /* ---------------------------------------------------------
+     4. PARCHE: CALIDAD GRÁFICA (sombra / glow)
+     --------------------------------------------------------- */
+  (function patchGraphics() {
+    const proto = CanvasRenderingContext2D.prototype;
+
+    // shadowBlur → 0 en BAJOS, máx 8 en MEDIOS
+    const sbDesc = Object.getOwnPropertyDescriptor(proto, 'shadowBlur');
+    if (sbDesc && sbDesc.set) {
+      Object.defineProperty(proto, 'shadowBlur', {
+        configurable: true,
+        enumerable: sbDesc.enumerable,
+        get: sbDesc.get,
+        set: function(v) {
+          if (settings.quality === 'low') v = 0;
+          else if (settings.quality === 'med') v = Math.min(v, 8);
+          sbDesc.set.call(this, v);
+        }
+      });
+    }
+
+    // glow (additive) → desactivado en BAJOS
+    const gcoDesc = Object.getOwnPropertyDescriptor(proto, 'globalCompositeOperation');
+    if (gcoDesc && gcoDesc.set) {
+      Object.defineProperty(proto, 'globalCompositeOperation', {
+        configurable: true,
+        enumerable: gcoDesc.enumerable,
+        get: gcoDesc.get,
+        set: function(v) {
+          if (settings.quality === 'low' && v === 'lighter') v = 'source-over';
+          gcoDesc.set.call(this, v);
+        }
+      });
+    }
+  })();
+
+  /* ---------------------------------------------------------
+     5. PARCHE: DISPARO MANUAL
+     Bloquea los proyectiles del jugador cuando NO se está
+     disparando en modo manual (sin tocar el código original).
+     --------------------------------------------------------- */
+  const originalPush = Array.prototype.push;
+  window.__novaShooting = false;
+
+  Array.prototype.push = function(...args) {
+    if (args.length === 1 && !settings.autoShoot && !window.__novaShooting) {
+      const a = args[0];
+      // Firma exacta del proyectil del jugador:
+      // { dmg:1, vy:-720, life:2 }
+      if (a && a.dmg === 1 && a.vy === -720 && a.life === 2) {
+        return this.length; // se ignora silenciosamente
+      }
+    }
+    return originalPush.apply(this, args);
+  };
+
+  /* ---------------------------------------------------------
+     6. HELPERS DE ESTADO
+     --------------------------------------------------------- */
+  function isPlaying() {
+    return menuEl.classList.contains('hidden')
+        && pauseEl.classList.contains('hidden')
+        && overEl.classList.contains('hidden')
+        && settingsOverlay.classList.contains('hidden')
+        && lbOverlay.classList.contains('hidden');
+  }
+
+  function applyManualClass() {
+    document.documentElement.classList.toggle('manual-shoot', !settings.autoShoot);
+  }
+
+  /* ---------------------------------------------------------
+     7. CREACIÓN DE OVERLAYS (Ajustes + Récords)
+     --------------------------------------------------------- */
+  const settingsOverlay = document.createElement('div');
+  settingsOverlay.className = 'panel-overlay hidden';
+  settingsOverlay.id = 'novaSettings';
+  settingsOverlay.innerHTML = `
+    <div class="panel-title">⚙ CONFIGURACIÓN</div>
+    <p class="panel-hint">Los cambios se guardan automáticamente.</p>
+
+    <div class="setting-row">
+      <span class="setting-label">Disparo</span>
+      <div class="toggle" id="tgShoot">
+        <button data-val="auto">AUTO</button>
+        <button data-val="manual">MANUAL</button>
+      </div>
+    </div>
+
+    <div class="setting-row">
+      <span class="setting-label">Calidad gráfica</span>
+      <div class="toggle" id="tgQuality">
+        <button data-val="low">BAJOS</button>
+        <button data-val="med">MEDIOS</button>
+        <button data-val="high">ALTOS</button>
+      </div>
+    </div>
+
+    <div class="setting-row">
+      <span class="setting-label">Nombre del jugador</span>
+      <input class="setting-input" id="inpName" maxlength="14" placeholder="Jugador">
+    </div>
+
+    <div class="setting-row">
+      <span class="setting-label">Mostrar FPS</span>
+      <div class="toggle" id="tgFps">
+        <button data-val="off">NO</button>
+        <button data-val="on">SÍ</button>
+      </div>
+    </div>
+
+    <p class="panel-hint" id="manualHint" style="display:none;color:#ffd166">
+      Modo manual: mantén <b>ESPACIO</b> para disparar.<br>
+      <b>B</b> = bomba &nbsp;·&nbsp; <b>P</b> = pausa &nbsp;·&nbsp; en táctil: botón 🔥
+    </p>
+
+    <div style="display:flex;gap:10px;margin-top:4px">
+      <button class="btn-small danger" id="btnResetSettings">↺ RESTAURAR</button>
+      <button class="btn" id="btnCloseSettings" style="padding:11px 28px;font-size:13px">CERRAR</button>
+    </div>
+  `;
+  wrap.appendChild(settingsOverlay);
+
+  const lbOverlay = document.createElement('div');
+  lbOverlay.className = 'panel-overlay hidden';
+  lbOverlay.id = 'novaLeaderboard';
+  lbOverlay.innerHTML = `
+    <div class="panel-title">🏆 RÉCORDS</div>
+    <table class="lb-table">
+      <thead>
+        <tr><th>#</th><th>JUGADOR</th><th style="text-align:right">PUNTOS</th></tr>
+      </thead>
+      <tbody id="lbBody"></tbody>
+    </table>
+    <div id="lbEmpty" class="lb-empty">Aún no hay récords. ¡Juega una partida!</div>
+    <div style="display:flex;gap:10px;margin-top:6px">
+      <button class="btn-small danger" id="btnClearLb">🗑 BORRAR</button>
+      <button class="btn" id="btnCloseLb" style="padding:11px 28px;font-size:13px">CERRAR</button>
+    </div>
+  `;
+  wrap.appendChild(lbOverlay);
+
+  /* ---------------------------------------------------------
+     8. BOTONES EN EL MENÚ PRINCIPAL
+     --------------------------------------------------------- */
+  const menuExtras = document.createElement('div');
+  menuExtras.className = 'menu-extras';
+  menuExtras.innerHTML = `
+    <button class="btn-small" id="btnOpenSettings">⚙ AJUSTES</button>
+    <button class="btn-small" id="btnOpenLeaderboard">🏆 RÉCORDS</button>
+  `;
+  menuEl.appendChild(menuExtras);
+
+  /* ---------------------------------------------------------
+     9. BOTÓN TÁCTIL DE DISPARO
+     --------------------------------------------------------- */
+  const shootBtn = document.createElement('button');
+  shootBtn.className = 'tbtn';
+  shootBtn.id = 'btnShootTouch';
+  shootBtn.setAttribute('aria-label', 'Disparar');
+  shootBtn.textContent = '🔥';
+  if (actionBtns) actionBtns.insertBefore(shootBtn, actionBtns.firstChild);
+
+  shootBtn.addEventListener('pointerdown', e => {
+    e.preventDefault();
+    if (!isPlaying()) return;
+    window.__novaShooting = true;
+    try { shootBtn.setPointerCapture(e.pointerId); } catch (err) {}
+  });
+  ['pointerup', 'pointercancel', 'pointerleave'].forEach(evt => {
+    shootBtn.addEventListener(evt, () => { window.__novaShooting = false; });
+  });
+
+  /* ---------------------------------------------------------
+     10. MANEJO DE TECLADO PARA MODO MANUAL
+     --------------------------------------------------------- */
+  // SPACE dispara en manual (bloquea la bomba original)
+  window.addEventListener('keydown', e => {
+    if (e.code === 'Space' && !e.repeat && !e.__novaSynthetic) {
+      if (isPlaying() && !settings.autoShoot) {
+        e.stopImmediatePropagation();
+        e.preventDefault();
+        window.__novaShooting = true;
+      }
+    }
+  }, true);
+
+  window.addEventListener('keyup', e => {
+    if (e.code === 'Space') window.__novaShooting = false;
+  }, true);
+
+  // B = bomba en modo manual (simula la tecla ESPACIO original)
+  window.addEventListener('keydown', e => {
+    if (e.code === 'KeyB' && !e.repeat && isPlaying() && !settings.autoShoot) {
+      e.preventDefault();
+      const evt = new KeyboardEvent('keydown', { code: 'Space', key: ' ', bubbles: true });
+      evt.__novaSynthetic = true;
+      window.dispatchEvent(evt);
+    }
+  }, true);
+
+  // Seguridad: liberar flag al perder foco / cambiar pestaña
+  window.addEventListener('blur', () => { window.__novaShooting = false; });
+  document.addEventListener('visibilitychange', () => {
+    if (document.hidden) window.__novaShooting = false;
+  });
+
+  /* ---------------------------------------------------------
+     11. LÓGICA DE AJUSTES (UI)
+     --------------------------------------------------------- */
+  function refreshSettingsUI() {
+    // Toggle disparo
+    settingsOverlay.querySelectorAll('#tgShoot button').forEach(b => {
+      b.classList.toggle('active',
+        (b.dataset.val === 'auto') === settings.autoShoot);
+    });
+    // Toggle calidad
+    settingsOverlay.querySelectorAll('#tgQuality button').forEach(b => {
+      b.classList.toggle('active', b.dataset.val === settings.quality);
+    });
+    // Toggle FPS
+    settingsOverlay.querySelectorAll('#tgFps button').forEach(b => {
+      b.classList.toggle('active',
+        (b.dataset.val === 'on') === settings.showFps);
+    });
+    // Nombre
+    const inp = settingsOverlay.querySelector('#inpName');
+    if (inp && document.activeElement !== inp) inp.value = settings.playerName;
+    // Hint manual
+    settingsOverlay.querySelector('#manualHint').style.display =
+      settings.autoShoot ? 'none' : 'block';
+    // Clase global
+    applyManualClass();
+    // FPS visible
+    fpsEl.classList.toggle('hidden', !settings.showFps);
+  }
+
+  // Toggle disparo
+  settingsOverlay.querySelectorAll('#tgShoot button').forEach(btn => {
+    btn.addEventListener('click', () => {
+      settings.autoShoot = btn.dataset.val === 'auto';
+      window.__novaShooting = false;
+      saveSettings();
+      refreshSettingsUI();
+    });
+  });
+
+  // Toggle calidad
+  settingsOverlay.querySelectorAll('#tgQuality button').forEach(btn => {
+    btn.addEventListener('click', () => {
+      settings.quality = btn.dataset.val;
+      saveSettings();
+      refreshSettingsUI();
+    });
+  });
+
+  // Toggle FPS
+  settingsOverlay.querySelectorAll('#tgFps button').forEach(btn => {
+    btn.addEventListener('click', () => {
+      settings.showFps = btn.dataset.val === 'on';
+      saveSettings();
+      refreshSettingsUI();
+    });
+  });
+
+  // Nombre
+  const nameInput = settingsOverlay.querySelector('#inpName');
+  nameInput.addEventListener('input', () => {
+    settings.playerName = nameInput.value.trim() || 'Jugador';
+    saveSettings();
+  });
+  nameInput.addEventListener('blur', () => {
+    nameInput.value = settings.playerName;
+  });
+
+  // Restaurar
+  settingsOverlay.querySelector('#btnResetSettings').addEventListener('click', () => {
+    settings = Object.assign({}, defaults);
+    saveSettings();
+    refreshSettingsUI();
+  });
+
+  // Abrir / cerrar ajustes
+  document.getElementById('btnOpenSettings').addEventListener('click', () => {
+    refreshSettingsUI();
+    settingsOverlay.classList.remove('hidden');
+  });
+  settingsOverlay.querySelector('#btnCloseSettings').addEventListener('click', () => {
+    settingsOverlay.classList.add('hidden');
+  });
+
+  /* ---------------------------------------------------------
+     12. LEADERBOARD
+     --------------------------------------------------------- */
+  function loadLeaderboard() {
+    try {
+      const raw = localStorage.getItem(LEADERBOARD_KEY);
+      const arr = raw ? JSON.parse(raw) : [];
+      return Array.isArray(arr) ? arr : [];
+    } catch (e) { return []; }
+  }
+  function saveLeaderboard(arr) {
+    try { localStorage.setItem(LEADERBOARD_KEY, JSON.stringify(arr)); } catch (e) {}
+  }
+
+  function renderLeaderboard() {
+    const body  = document.getElementById('lbBody');
+    const empty = document.getElementById('lbEmpty');
+    const arr = loadLeaderboard();
+    body.innerHTML = '';
+    if (!arr.length) {
+      empty.style.display = 'block';
+      return;
+    }
+    empty.style.display = 'none';
+    arr.forEach((entry, i) => {
+      const tr = document.createElement('tr');
+      if (i === 0) tr.className = 'top1';
+      else if (i === 1) tr.className = 'top2';
+      else if (i === 2) tr.className = 'top3';
+      const medal = i === 0 ? '🥇' : i === 1 ? '🥈' : i === 2 ? '🥉' : (i + 1);
+      tr.innerHTML = `
+        <td class="rank">${medal}</td>
+        <td class="name">${escapeHtml(entry.name || 'Anónimo')}</td>
+        <td class="score">${String(entry.score).padStart(6, '0')}</td>
+      `;
+      body.appendChild(tr);
+    });
+  }
+
+  function escapeHtml(s) {
+    return String(s).replace(/[&<>"']/g, c => ({
+      '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'
+    }[c]));
+  }
+
+  function addScoreToLeaderboard(score) {
+    if (!score || score <= 0) return;
+    const arr = loadLeaderboard();
+    arr.push({
+      name: settings.playerName || 'Jugador',
+      score: score,
+      date: Date.now()
+    });
+    arr.sort((a, b) => b.score - a.score);
+    saveLeaderboard(arr.slice(0, 20));
+  }
+
+  // Abrir / cerrar / borrar
+  document.getElementById('btnOpenLeaderboard').addEventListener('click', () => {
+    renderLeaderboard();
+    lbOverlay.classList.remove('hidden');
+  });
+  document.getElementById('btnCloseLb').addEventListener('click', () => {
+    lbOverlay.classList.add('hidden');
+  });
+  document.getElementById('btnClearLb').addEventListener('click', () => {
+    if (confirm('¿Borrar todos los récords?')) {
+      saveLeaderboard([]);
+      renderLeaderboard();
+    }
+  });
+
+  /* ---------------------------------------------------------
+     13. GUARDADO AUTOMÁTICO AL TERMINAR PARTIDA
+     --------------------------------------------------------- */
+  let lastSavedScore = 0;
+
+  const overObserver = new MutationObserver(() => {
+    const isHidden = overEl.classList.contains('hidden');
+    if (!isHidden) {
+      // Game over visible → guardar (con pequeño delay para asegurar el texto)
+      setTimeout(() => {
+        const score = parseInt(overScoreEl.textContent, 10) || 0;
+        if (score > 0 && score !== lastSavedScore) {
+          lastSavedScore = score;
+          addScoreToLeaderboard(score);
+        }
+      }, 120);
+    } else {
+      // Al ocultarse, reseteamos para la próxima partida
+      lastSavedScore = 0;
+      window.__novaShooting = false;
+    }
+  });
+  overObserver.observe(overEl, { attributes: true, attributeName: 'class' });
+
+  /* ---------------------------------------------------------
+     14. CONTADOR DE FPS (opcional)
+     --------------------------------------------------------- */
+  const fpsEl = document.createElement('div');
+  fpsEl.id = 'novaFps';
+  fpsEl.className = 'hidden';
+  fpsEl.textContent = '-- FPS';
+  wrap.appendChild(fpsEl);
+
+  let fpsFrames = 0;
+  let fpsLast = performance.now();
+  function fpsTick() {
+    fpsFrames++;
+    const now = performance.now();
+    if (now - fpsLast >= 500) {
+      const fps = Math.round(fpsFrames * 1000 / (now - fpsLast));
+      fpsEl.textContent = fps + ' FPS';
+      fpsFrames = 0;
+      fpsLast = now;
+    }
+    requestAnimationFrame(fpsTick);
+  }
+  requestAnimationFrame(fpsTick);
+
+  /* ---------------------------------------------------------
+     15. INICIALIZACIÓN
+     --------------------------------------------------------- */
+  refreshSettingsUI();
+  applyManualClass();
+
+  // Mostrar hint de bienvenida si es la primera vez con nombre por defecto
+  // (sutil, sin interrumpir)
+  console.log('%c🎮 NOVA STRIKE — Extras cargados: ajustes + récords',
+              'color:#4be1ff;font-weight:bold');
+
+})();
+</script>
 </body>
- </html>
+</html>
