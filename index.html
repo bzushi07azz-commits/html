@@ -131,6 +131,7 @@
     <h1>NOVA<span>STRIKE</span></h1>
     <p class="sub">Sobrevive a la invasión</p>
     <button class="btn" id="btnStart">▶ JUGAR</button>
+    <button class="btn alt" id="btnSurvival">▶ SUPERVIVENCIA</button>
     <div class="keys">
       <span class="key">← ↑ ↓ →</span><span class="key">W A S D</span>
       <span class="key">ESPACIO = BOMBA</span><span class="key">P = PAUSA</span>
@@ -138,6 +139,7 @@
     <p class="hint">En móvil: <b>arrastra el dedo</b> para mover la nave.<br>
       Disparo automático. Recoge los potenciadores.</p>
     <p class="stat">RÉCORD: <span id="bestMenu">0</span></p>
+    <p class="stat">RÉCORD SUPERVIVENCIA: <span id="bestSurvival">0</span></p>
   </div>
 
   <!-- PAUSA -->
@@ -150,10 +152,18 @@
   <!-- GAME OVER -->
   <div class="overlay hidden" id="over">
     <h2>NAVE DESTRUIDA</h2>
-    <p class="stat">PUNTUACIÓN: <span id="overScore">0</span></p>
+    <p class="stat"><span id="overLabel">PUNTUACIÓN</span>: <span id="overScore">0</span></p>
     <p class="stat">RÉCORD: <span id="overBest">0</span></p>
     <button class="btn" id="btnRetry">↻ REINTENTAR</button>
   </div>
+  
+  <!-- VICTORIA -->
+  <div class="overlay hidden" id="win">
+    <h2 style="color:#6bff9e;text-shadow:0 0 22px rgba(107,255,158,.75)">¡VICTORIA!</h2>
+    <p class="stat">Completaste las 10 rondas</p>
+    <p class="stat">PUNTUACIÓN: <span id="winScore">0</span></p>
+    <button class="btn" id="btnWinRetry">↻ JUGAR DE NUEVO</button>
+ </div>
 
   <!-- CONTROLES TÁCTILES (solo dispositivos táctiles) -->
   <div id="touchControls">
@@ -245,14 +255,41 @@ function noiseBurst(dur=0.3, vol=0.14){
    4. ESTADO GLOBAL
    ========================================================= */
 const game = {
-  state: 'menu',      // menu | playing | paused | gameover
+  state: 'menu',      // menu | playing | paused | gameover | won
   score: 0,
   best: 0,
   time: 0,
   shake: 0,
-  flash: 0
+  flash: 0,
+  lives: 3,
+  mode: 'classic',        // 'classic' | 'survival'
+  round: 1,
+  roundTime: 0,
+  survivalTime: 0,
+  bossActive: false,
+  bossDefeated: false
 };
-try { game.best = parseInt(localStorage.getItem('novaBest') || '0', 10) || 0; } catch(e){ game.best = 0; }
+
+const ROUND_DURATION = 300;     // 5 minutos por ronda
+const TOTAL_ROUNDS   = 10;
+const BOSS_TYPES     = ['spiral', 'laser', 'summoner'];
+
+let bestClassic  = 0;
+let bestSurvival = 0;
+try { bestClassic  = parseInt(localStorage.getItem('novaBest') || '0', 10) || 0; } catch(e){}
+try { bestSurvival = parseInt(localStorage.getItem('novaBestSurvival') || '0', 10) || 0; } catch(e){}
+game.best = bestClassic;
+
+function loadBest(mode){ return mode === 'survival' ? bestSurvival : bestClassic; }
+function saveBest(mode, val){
+  if(mode === 'survival'){
+    bestSurvival = val;
+    try { localStorage.setItem('novaBestSurvival', String(val)); } catch(e){}
+  } else {
+    bestClassic = val;
+    try { localStorage.setItem('novaBest', String(val)); } catch(e){}
+  }
+}
 
 let player    = null;
 let bullets   = [];   // del jugador
@@ -544,6 +581,7 @@ function updatePlayer(dt){
 }
 
 function playerShoot(){
+  if(game.mode === 'survival') return;
   const p = player;
   const VY = -720;
   let shots;
@@ -563,6 +601,7 @@ function playerShoot(){
 }
 
 function useBomb(){
+  if(game.mode === 'survival') return;
   if(game.state !== 'playing' || !player || player.bombs <= 0) return;
   player.bombs--;
   game.shake = Math.max(game.shake, 20);
@@ -629,7 +668,7 @@ function updateEBullets(dt){
    11. ENEMIGOS
    ========================================================= */
 function spawnEnemy(){
-  const t = game.time;
+  const t = game.mode === 'survival' ? game.survivalTime : game.roundTime;
   const pool = [['drone', 60]];
   if(t > 18) pool.push(['shooter', 26]);
   if(t > 38) pool.push(['dart', 22]);
@@ -721,6 +760,18 @@ function updateEnemies(dt){
           }
         }
         break;
+
+      case 'boss':
+        if(e.phase === 0){
+          e.y += 70 * dt;
+          if(e.y >= 140){ e.y = 140; e.phase = 1; }
+        } else {
+          e.x += Math.sin(e.t * 0.8) * 55 * dt;
+          e.x = clamp(e.x, e.r + 8, W - e.r - 8);
+          e.attackTimer -= dt;
+          if(e.attackTimer <= 0) bossAttack(e);
+        }
+        break;
     }
 
     e.x = clamp(e.x, e.r, W - e.r);
@@ -737,13 +788,118 @@ function damageEnemy(e, dmg){
     e.dead = true;
     game.score += e.score;
     addText(e.x, e.y, '+' + e.score, e.color);
-    explode(e.x, e.y, e.color, e.type === 'tank' ? 26 : 14, e.type === 'tank' ? 1.5 : 1);
-    sfx(e.type === 'tank' ? 120 : 220, 0.22, 'sawtooth', 0.07, -140);
-    noiseBurst(0.22, 0.1);
-    maybeDrop(e.x, e.y);
+
+    const boss = e.isBoss;
+    explode(e.x, e.y, e.color,
+      boss ? 44 : (e.type === 'tank' ? 26 : 14),
+      boss ? 2.5 : (e.type === 'tank' ? 1.5 : 1));
+    sfx(boss ? 100 : (e.type === 'tank' ? 120 : 220), 0.25, 'sawtooth', 0.08, -140);
+    noiseBurst(0.25, 0.12);
+
+    if(boss){
+      game.bossDefeated = true;
+      game.bossActive   = false;
+      game.shake        = Math.max(game.shake, 22);
+      game.flash        = 0.9;
+      addText(W/2, H/2, '¡JEFE DERROTADO!', '#6bff9e');
+      powerups.push(makePowerup(e.x - 22, e.y, 'power'));
+      powerups.push(makePowerup(e.x + 22, e.y, 'shield'));
+      noiseBurst(0.6, 0.22);
+    } else {
+      maybeDrop(e.x, e.y);
+    }
   }
 }
+/* =========================================================
+   JEFES
+   ========================================================= */
+function spawnBoss(round){
+  const bossType = BOSS_TYPES[(round - 1) % BOSS_TYPES.length];
+  const hpBase   = 120 + (round - 1) * 90;
+  const r        = 34 + Math.min(round * 1.5, 14);
 
+  enemies.push({
+    type: 'boss',
+    bossType,
+    x: W/2,
+    y: -80,
+    r,
+    hp: hpBase,
+    maxHp: hpBase,
+    speed: 0,
+    score: 300 + round * 100,
+    color: '#ff4bd8',
+    t: 0,
+    phase: 0,              // 0 = entrando, 1 = combate
+    attackTimer: 1.5,
+    patternIndex: 0,
+    flash: 0,
+    dead: false,
+    isBoss: true,
+    round
+  });
+
+  game.bossActive    = true;
+  game.bossDefeated  = false;
+  addText(W/2, 180, '¡JEFE — RONDA ' + round + '!', '#ff4bd8');
+  sfx(120, 0.55, 'sawtooth', 0.10, -60);
+  noiseBurst(0.45, 0.12);
+}
+
+function bossAttack(boss){
+  const round = boss.round || 1;
+  const spd   = 145 + round * 8;
+
+  if(boss.bossType === 'spiral'){
+    const n   = 8;
+    const off = boss.t * 2.2;
+    for(let i = 0; i < n; i++){
+      enemyShoot(boss, (i / n) * TAU + off, spd, '#ff4bd8');
+    }
+    boss.attackTimer = Math.max(0.35, 0.65 - round * 0.02);
+
+  } else if(boss.bossType === 'laser'){
+    if(player){
+      const base = Math.atan2(player.y - boss.y, player.x - boss.x);
+      for(let k = -3; k <= 3; k++){
+        enemyShoot(boss, base + k * 0.11, spd, '#ffd166');
+      }
+    }
+    boss.attackTimer = Math.max(0.6, 1.2 - round * 0.04);
+
+  } else { // summoner
+    const n   = 12 + round * 2;
+    const off = boss.patternIndex * 0.25;
+    for(let i = 0; i < n; i++){
+      enemyShoot(boss, (i / n) * TAU + off, spd * 0.8, '#b26bff');
+    }
+    boss.patternIndex++;
+    if(boss.patternIndex % 3 === 0 && enemies.length < 22){
+      for(let k = 0; k < 2; k++){
+        const def = ENEMY_DEFS.drone;
+        enemies.push({
+          type: 'drone',
+          x: rand(60, W - 60),
+          y: -30,
+          r: def.r,
+          hp: def.hp,
+          maxHp: def.hp,
+          speed: def.speed,
+          score: def.score,
+          color: def.color,
+          t: 0,
+          phase: rand(0, TAU),
+          fireTimer: 2,
+          targetY: 150,
+          flash: 0,
+          dead: false
+        });
+      }
+    }
+    boss.attackTimer = Math.max(0.7, 1.4 - round * 0.05);
+  }
+  sfx(200, 0.12, 'sawtooth', 0.045, -90);
+}
 /* =========================================================
    12. POTENCIADORES
    ========================================================= */
@@ -827,17 +983,17 @@ function updateParticles(dt){
    ========================================================= */
 function updateSpawner(dt){
   if(enemies.length > 26) return;
+  const t = game.mode === 'survival' ? game.survivalTime : game.roundTime;
   spawnTimer -= dt;
   if(spawnTimer <= 0){
     const extra = Math.random() < 0.28 ? 1 : 0;
-    const extra2 = (game.time > 55 && Math.random() < 0.25) ? 1 : 0;
+    const extra2 = (t > 55 && Math.random() < 0.25) ? 1 : 0;
     for(let i = 0; i < 1 + extra + extra2; i++) spawnEnemy();
 
-    const base = Math.max(0.30, 0.95 - game.time*0.0062);
+    const base = Math.max(0.30, 0.95 - t*0.0062);
     spawnTimer = base * rand(0.82, 1.25);
   }
 }
-
 /* =========================================================
    15. COLISIONES
    ========================================================= */
@@ -860,7 +1016,10 @@ function checkCollisions(){
     for(const e of enemies){
       if(e.dead) continue;
       if(circleHit(e, player)){
-        damageEnemy(e, 999);
+        // Los jefes NO mueren al contacto: solo te dañan
+        if(!e.isBoss){
+          damageEnemy(e, 999);
+        }
         hitPlayer();
         break;
       }
@@ -957,7 +1116,44 @@ function drawEnemy(e){
   ctx.strokeStyle = col;
   ctx.fillStyle = 'rgba(8,12,26,0.9)';
 
-  if(e.type === 'drone'){
+    if(e.isBoss){
+    const bCol = e.flash > 0 ? '#ffffff' : e.color;
+    ctx.shadowColor = bCol;
+    ctx.shadowBlur = 30;
+    ctx.lineWidth = 3;
+    ctx.strokeStyle = bCol;
+
+    // Anillo exterior giratorio
+    ctx.save();
+    ctx.rotate(e.t * 0.6);
+    ctx.beginPath();
+    for(let i = 0; i < 8; i++){
+      const a  = (i / 8) * TAU;
+      const r1 = e.r;
+      const r2 = e.r * 0.7;
+      const px1 = Math.cos(a) * r1, py1 = Math.sin(a) * r1;
+      const px2 = Math.cos(a + 0.2) * r2, py2 = Math.sin(a + 0.2) * r2;
+      if(i === 0) ctx.moveTo(px1, py1); else ctx.lineTo(px1, py1);
+      ctx.lineTo(px2, py2);
+    }
+    ctx.closePath();
+    ctx.fillStyle = 'rgba(40,10,50,0.9)';
+    ctx.fill();
+    ctx.stroke();
+    ctx.restore();
+
+    // Núcleo pulsante
+    const pulse = 0.7 + Math.sin(e.t * 4) * 0.3;
+    ctx.beginPath();
+    ctx.arc(0, 0, e.r * 0.4 * pulse, 0, TAU);
+    ctx.fillStyle = e.bossType === 'spiral'  ? '#ff4bd8'
+                 : e.bossType === 'laser'   ? '#ffd166'
+                 :                            '#b26bff';
+    ctx.shadowColor = ctx.fillStyle;
+    ctx.shadowBlur = 30;
+    ctx.fill();
+
+  } else if(e.type === 'drone'){
     ctx.beginPath();
     ctx.moveTo(0, e.r);
     ctx.lineTo(-e.r, -e.r*0.35);
@@ -1017,7 +1213,7 @@ function drawEnemy(e){
   ctx.restore();
 
   // Barra de vida (solo si está dañado)
-  if(e.hp < e.maxHp){
+  if(e.hp < e.maxHp && !e.isBoss){
     const w = e.r*2, hp = clamp(e.hp/e.maxHp, 0, 1);
     ctx.fillStyle = 'rgba(0,0,0,0.55)';
     ctx.fillRect(e.x - w/2, e.y - e.r - 12, w, 4);
@@ -1134,21 +1330,52 @@ function drawEffects(){
 function drawHUD(){
   ctx.save();
   ctx.textBaseline = 'top';
-
-  // Puntuación
-  ctx.font = 'bold 22px ui-monospace, monospace';
-  ctx.textAlign = 'left';
-  ctx.fillStyle = '#e8f4ff';
-  ctx.shadowColor = '#4be1ff';
-  ctx.shadowBlur = 14;
-  ctx.fillText(String(game.score).padStart(6,'0'), 16, 14);
+  // Puntuación / Cronómetro
+  if(game.mode === 'survival'){
+    const t = game.survivalTime;
+    const mm = Math.floor(t / 60);
+    const ss = Math.floor(t % 60);
+    const tStr = mm + ':' + String(ss).padStart(2, '0');
+    ctx.font = 'bold 24px ui-monospace, monospace';
+    ctx.textAlign = 'left';
+    ctx.fillStyle = '#4be1ff';
+    ctx.shadowColor = '#4be1ff';
+    ctx.shadowBlur = 14;
+    ctx.fillText(tStr, 16, 14);
+  } else {
+    ctx.font = 'bold 22px ui-monospace, monospace';
+    ctx.textAlign = 'left';
+    ctx.fillStyle = '#e8f4ff';
+    ctx.shadowColor = '#4be1ff';
+    ctx.shadowBlur = 14;
+    ctx.fillText(String(game.score).padStart(6,'0'), 16, 14);
+  }
 
   // Récord
   ctx.font = '11px ui-monospace, monospace';
   ctx.shadowBlur = 0;
   ctx.fillStyle = 'rgba(160,190,220,0.75)';
-  ctx.fillText('RÉCORD ' + game.best, 16, 42);
+  ctx.fillText('RÉCORD ' + loadBest(game.mode), 16, 42);
 
+  // Ronda + temporizador (solo modo normal)
+  if(game.mode === 'classic'){
+    const remain = Math.max(0, ROUND_DURATION - game.roundTime);
+    const mm = Math.floor(remain / 60);
+    const ss = Math.floor(remain % 60);
+    const timeStr = mm + ':' + String(ss).padStart(2, '0');
+
+    ctx.font = 'bold 12px ui-monospace, monospace';
+    ctx.textAlign = 'left';
+    ctx.fillStyle = '#4be1ff';
+    ctx.shadowColor = '#4be1ff';
+    ctx.shadowBlur = 8;
+    ctx.fillText('RONDA ' + game.round + '/' + TOTAL_ROUNDS, 16, 60);
+
+    ctx.font = 'bold 14px ui-monospace, monospace';
+    ctx.fillStyle = remain < 30 ? '#ff5f7e' : '#c8dcf0';
+    ctx.shadowColor = ctx.fillStyle;
+    ctx.fillText(timeStr, 16, 78);
+  }
   // Vidas (naves)
   ctx.textAlign = 'right';
   for(let i = 0; i < game.lives; i++){
@@ -1184,7 +1411,7 @@ function drawHUD(){
   }
 
   // Nivel de potencia
-  if(player){
+  if(player && game.mode === 'classic'){
     ctx.shadowBlur = 0;
     ctx.textAlign = 'left';
     ctx.fillStyle = 'rgba(120,220,255,0.8)';
@@ -1193,6 +1420,35 @@ function drawHUD(){
     for(let i = 0; i < 4; i++){
       ctx.fillStyle = i < player.power ? '#4be1ff' : 'rgba(75,225,255,0.18)';
       ctx.fillRect(48 + i*16, H - 24, 12, 8);
+    }
+  }
+  
+  // Barra de vida del jefe
+  if(game.bossActive){
+    const boss = enemies.find(e => e.isBoss && !e.dead);
+    if(boss){
+      const hp    = clamp(boss.hp / boss.maxHp, 0, 1);
+      const barW  = W - 80;
+      const barX  = 40;
+      const barY  = 100;
+
+      ctx.shadowBlur = 0;
+      ctx.fillStyle = 'rgba(0,0,0,0.6)';
+      ctx.fillRect(barX, barY, barW, 8);
+
+      const grad = ctx.createLinearGradient(barX, 0, barX + barW, 0);
+      grad.addColorStop(0, '#ff4bd8');
+      grad.addColorStop(1, '#ffd166');
+      ctx.fillStyle = grad;
+      ctx.shadowColor = '#ff4bd8';
+      ctx.shadowBlur = 14;
+      ctx.fillRect(barX, barY, barW * hp, 8);
+
+      ctx.shadowBlur = 0;
+      ctx.font = 'bold 9px ui-monospace, monospace';
+      ctx.textAlign = 'center';
+      ctx.fillStyle = '#ff4bd8';
+      ctx.fillText('JEFE — RONDA ' + boss.round, W/2, barY - 11);
     }
   }
 
@@ -1227,13 +1483,23 @@ function render(){
     ctx.fillRect(0, 0, W, H);
     ctx.restore();
   }
-
+  // Aviso: tiempo agotado pero jefe sigue vivo
+  if(game.mode === 'classic' && game.roundTime >= ROUND_DURATION && game.bossActive){
+    ctx.textAlign = 'center';
+    ctx.fillStyle = '#ff5f7e';
+    ctx.shadowColor = '#ff5f7e';
+    ctx.shadowBlur = 14;
+    ctx.font = 'bold 14px ui-monospace, monospace';
+    ctx.fillText('¡DERROTA AL JEFE!', W/2, H - 100);
+  }
   drawHUD();
 }
 
 /* =========================================================
    17. BUCLE PRINCIPAL
    ========================================================= */
+let survivalPowerTimer = 15;
+
 function update(dt){
   updateStars(dt);
 
@@ -1243,6 +1509,26 @@ function update(dt){
   if(game.state !== 'playing') return;
 
   game.time += dt;
+
+  if(game.mode === 'survival'){
+    game.survivalTime += dt;
+    game.score = Math.floor(game.survivalTime);
+
+    // Power-ups flotantes periódicos (solo escudo / vida)
+    survivalPowerTimer -= dt;
+    if(survivalPowerTimer <= 0){
+      const type = Math.random() < 0.75 ? 'shield' : 'life';
+      powerups.push(makePowerup(rand(40, W-40), -20, type));
+      survivalPowerTimer = rand(14, 22);
+    }
+  } else {
+    game.roundTime += dt;
+    if(game.roundTime >= ROUND_DURATION && game.bossDefeated){
+      nextRound();
+      return;
+    }
+  }
+
   updatePlayer(dt);
   updateBullets(dt);
   updateEnemies(dt);
@@ -1253,6 +1539,45 @@ function update(dt){
   checkCollisions();
 }
 
+function nextRound(){
+  if(game.round >= TOTAL_ROUNDS){
+    winGame();
+    return;
+  }
+  game.round++;
+  game.roundTime    = 0;
+  game.bossActive   = false;
+  game.bossDefeated = false;
+
+  // Limpieza para transición limpia
+  enemies.length  = 0;
+  ebullets.length = 0;
+  bullets.length  = 0;
+
+  // Pequeña recompensa entre rondas
+  game.lives       = Math.min(5, game.lives + 1);
+  player.bombs     = Math.min(5, player.bombs + 1);
+
+  spawnBoss(game.round);
+  addText(W/2, H/2, 'RONDA ' + game.round, '#4be1ff');
+  game.flash = 0.6;
+}
+
+function winGame(){
+  game.state = 'won';
+  game.best = loadBest('classic');
+  if(game.score > game.best){
+    game.best = game.score;
+    saveBest('classic', game.best);
+  }
+  document.getElementById('winScore').textContent = game.score;
+  document.getElementById('bestMenu').textContent     = bestClassic;
+  document.getElementById('bestSurvival').textContent = bestSurvival;
+  document.getElementById('win').classList.remove('hidden');
+  setTouchUI(false);
+  game.flash = 1;
+  noiseBurst(0.8, 0.2);
+}
 let lastTs = 0;
 function loop(ts){
   if(!lastTs) lastTs = ts;
@@ -1277,46 +1602,78 @@ function hideAll(){
   elMenu.classList.add('hidden');
   elPause.classList.add('hidden');
   elOver.classList.add('hidden');
+  document.getElementById('win').classList.add('hidden');
 }
 
-function startGame(){
+function startGame(mode){
   ensureAudio();
+  game.mode = mode || 'classic';
+
   player = makePlayer();
-  bullets.length = 0;
+  bullets.length  = 0;
   ebullets.length = 0;
-  enemies.length = 0;
+  enemies.length  = 0;
   powerups.length = 0;
   particles.length = 0;
-  rings.length = 0;
-  texts.length = 0;
+  rings.length    = 0;
+  texts.length    = 0;
 
-  game.state = 'playing';
-  game.score = 0;
-  game.time = 0;
-  game.shake = 0;
-  game.flash = 0;
-  game.lives = 3;
+  game.state        = 'playing';
+  game.score        = 0;
+  game.time         = 0;
+  game.shake        = 0;
+  game.flash        = 0;
+  game.lives        = game.mode === 'survival' ? 1 : 3;
+  game.round        = 1;
+  game.roundTime    = 0;
+  game.survivalTime = 0;
+  game.bossActive   = false;
+  game.bossDefeated = false;
+  game.best         = loadBest(game.mode);
+
   spawnTimer = 0.9;
+  survivalPowerTimer = 15;
+
+  if(game.mode === 'survival'){
+    player.bombs = 0;
+  }
 
   pointer.active = false;
   pointer.down = false;
   joyReset();
 
   hideAll();
-  setTouchUI(true);          // ← muestra joystick y botones en Android
+  setTouchUI(true);
+
+  if(game.mode === 'classic'){
+    spawnBoss(1);
+  } else {
+    addText(W/2, H/2, '¡SOBREVIVE!', '#4be1ff');
+  }
 }
 
 function gameOver(){
   game.state = 'gameover';
+
+  if(game.mode === 'survival'){
+    game.score = Math.floor(game.survivalTime);
+  }
+
+  game.best = loadBest(game.mode);
   if(game.score > game.best){
     game.best = game.score;
-    try { localStorage.setItem('novaBest', String(game.best)); } catch(e){}
+    saveBest(game.mode, game.best);
   }
+
+  document.getElementById('overLabel').textContent =
+    game.mode === 'survival' ? 'TIEMPO (SEG)' : 'PUNTUACIÓN';
   document.getElementById('overScore').textContent = game.score;
   document.getElementById('overBest').textContent  = game.best;
-  document.getElementById('bestMenu').textContent  = game.best;
+  document.getElementById('bestMenu').textContent     = bestClassic;
+  document.getElementById('bestSurvival').textContent = bestSurvival;
+
   elOver.classList.remove('hidden');
-  setTouchUI(false);         // ← oculta los controles táctiles
+  setTouchUI(false);
   explode(player.x, player.y, '#ff8a5c', 44, 2);
   game.shake = 24;
   noiseBurst(0.7, 0.25);
@@ -1334,13 +1691,16 @@ function togglePause(){
   }
 }
 
-document.getElementById('btnStart').addEventListener('click', startGame);
-document.getElementById('btnRetry').addEventListener('click', startGame);
+document.getElementById('btnStart').addEventListener('click', () => startGame('classic'));
+document.getElementById('btnSurvival').addEventListener('click', () => startGame('survival'));
+document.getElementById('btnRetry').addEventListener('click', () => startGame(game.mode));
+document.getElementById('btnWinRetry').addEventListener('click', () => startGame('classic'));
 document.getElementById('btnResume').addEventListener('click', togglePause);
 document.getElementById('btnQuit').addEventListener('click', () => {
   game.state = 'menu';
   elPause.classList.add('hidden');
-  document.getElementById('bestMenu').textContent = game.best;
+  document.getElementById('bestMenu').textContent     = bestClassic;
+  document.getElementById('bestSurvival').textContent = bestSurvival;
   elMenu.classList.remove('hidden');
   setTouchUI(false);
 });
@@ -1354,7 +1714,8 @@ document.addEventListener('visibilitychange', () => {
    ========================================================= */
 resize();
 initBackground();
-document.getElementById('bestMenu').textContent = game.best;
+document.getElementById('bestMenu').textContent     = bestClassic;
+document.getElementById('bestSurvival').textContent = bestSurvival;
 requestAnimationFrame(loop);
 
 })();
