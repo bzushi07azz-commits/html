@@ -221,6 +221,21 @@ function ensureAudio(){
   }
   if(actx && actx.state === 'suspended') actx.resume();
 }
+/* ---- Música de fondo (modo supervivencia) ---- */
+const bgm = new Audio('musica_supervivencia.mp3');
+bgm.loop = true;      // se repite infinitamente
+bgm.volume = 0.5;     // volumen de 0 a 1
+bgm.preload = 'auto';
+function bgmStart(){
+  bgm.currentTime = 0;
+  bgm.muted = !soundOn;
+  const p = bgm.play();
+  if(p && p.catch) p.catch(()=>{});
+}
+function bgmStop(){ bgm.pause(); bgm.currentTime = 0; }
+function bgmPause(){ bgm.pause(); }
+function bgmResume(){ bgm.muted = !soundOn; const p = bgm.play(); if(p && p.catch) p.catch(()=>{}); }
+
 function sfx(freq, dur, type='square', vol=0.05, slide=0){
   if(!soundOn || !actx) return;
   const t = actx.currentTime;
@@ -332,7 +347,7 @@ window.addEventListener('keydown', e => {
     if(game.state === 'menu' || game.state === 'gameover') startGame();
   }
   if(e.code === 'KeyP' || e.code === 'Escape') togglePause();
-  if(e.code === 'KeyM') soundOn = !soundOn;
+  if(e.code === 'KeyM'){ soundOn = !soundOn; bgm.muted = !soundOn; }
 });
 window.addEventListener('keyup', e => { keys[e.code] = false; });
 
@@ -1646,14 +1661,17 @@ function startGame(mode){
   setTouchUI(true);
 
   if(game.mode === 'classic'){
+    bgmStop();
     spawnBoss(1);
   } else {
+    bgmStart();
     addText(W/2, H/2, '¡SOBREVIVE!', '#4be1ff');
   }
 }
 
 function gameOver(){
   game.state = 'gameover';
+  bgmStop();
 
   if(game.mode === 'survival'){
     game.score = Math.floor(game.survivalTime);
@@ -1683,10 +1701,12 @@ function togglePause(){
   if(game.state === 'playing'){
     game.state = 'paused';
     elPause.classList.remove('hidden');
+    if(game.mode === 'survival') bgmPause();
     setTouchUI(false);       // ← oculta los controles táctiles
   } else if(game.state === 'paused'){
     game.state = 'playing';
     elPause.classList.add('hidden');
+    if(game.mode === 'survival') bgmResume();
     setTouchUI(true);        // ← los vuelve a mostrar
   }
 }
@@ -1698,6 +1718,7 @@ document.getElementById('btnWinRetry').addEventListener('click', () => startGame
 document.getElementById('btnResume').addEventListener('click', togglePause);
 document.getElementById('btnQuit').addEventListener('click', () => {
   game.state = 'menu';
+  bgmStop();
   elPause.classList.add('hidden');
   document.getElementById('bestMenu').textContent     = bestClassic;
   document.getElementById('bestSurvival').textContent = bestSurvival;
