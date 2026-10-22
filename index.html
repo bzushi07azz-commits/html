@@ -1739,6 +1739,179 @@ document.getElementById('bestMenu').textContent     = bestClassic;
 document.getElementById('bestSurvival').textContent = bestSurvival;
 requestAnimationFrame(loop);
 
+/* =========================================================
+   20. UTILIDADES INTERNAS
+   ========================================================= */
+const dbg = { el: null, open: false, resume: false, god: false, fast: false, refresh: null };
+
+const _hitOrig = hitPlayer;
+hitPlayer = function(){ if(dbg.god) return; return _hitOrig(); };
+
+setInterval(() => {
+  if(!player) return;
+  if(dbg.fast) player.speed = 640;
+  else if(player.speed === 640) player.speed = 350;
+}, 100);
+
+function dbgBuild(){
+  const st = document.createElement('style');
+  st.textContent =
+    '.x9p{position:fixed;inset:0;z-index:99999;display:none;align-items:center;justify-content:center;' +
+    'background:rgba(2,2,10,.72);backdrop-filter:blur(4px);-webkit-backdrop-filter:blur(4px);' +
+    'font-family:"Segoe UI",system-ui,sans-serif;color:#e8f4ff;line-height:1.4}' +
+    '.x9p .bx{width:min(360px,92vw);max-height:92vh;overflow:auto;padding:18px;border-radius:14px;' +
+    'background:rgba(6,8,22,.97);border:1px solid rgba(75,225,255,.4);' +
+    'box-shadow:0 0 40px rgba(75,225,255,.25),0 0 90px rgba(155,107,255,.15)}' +
+    '.x9p h3{font-size:15px;letter-spacing:.3em;color:#4be1ff;text-align:center;margin-bottom:4px;' +
+    'text-shadow:0 0 14px rgba(75,225,255,.7)}' +
+    '.x9p .st{font-size:11px;letter-spacing:.08em;color:#8fa8c4;text-align:center;margin-bottom:12px}' +
+    '.x9p .gr{display:grid;grid-template-columns:1fr 1fr;gap:8px}' +
+    '.x9p button,.x9p select{font:inherit;font-size:12px;font-weight:700;letter-spacing:.05em;padding:9px 6px;' +
+    'border-radius:9px;cursor:pointer;color:#cfeaff;background:rgba(75,225,255,.08);' +
+    'border:1px solid rgba(75,225,255,.35)}' +
+    '.x9p button:hover{background:rgba(75,225,255,.2)}' +
+    '.x9p button.on{background:linear-gradient(180deg,#9df3ff,#2ec2ff);color:#04101a;border-color:transparent}' +
+    '.x9p button.wd{grid-column:1 / -1}' +
+    '.x9p .rw{grid-column:1 / -1;display:flex;gap:8px}' +
+    '.x9p .rw select{flex:1;background:#0a0d24}' +
+    '.x9p .rw button{flex:1}';
+  document.head.appendChild(st);
+
+  const root = document.createElement('div');
+  root.className = 'x9p';
+  const box = document.createElement('div');
+  box.className = 'bx';
+  const title = document.createElement('h3');
+  title.textContent = 'DEBUG';
+  const info = document.createElement('div');
+  info.className = 'st';
+  const grid = document.createElement('div');
+  grid.className = 'gr';
+  box.append(title, info, grid);
+  root.appendChild(box);
+
+  const classicOnly = () => game.mode === 'classic';
+  const live = () => !!player && (game.state === 'playing' || game.state === 'paused');
+  const toggles = [];
+
+  function add(label, fn, wide){
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.textContent = label;
+    if(wide) b.className = 'wd';
+    b.addEventListener('click', () => { fn(b); b.blur(); dbg.refresh(); });
+    grid.appendChild(b);
+    return b;
+  }
+  function addToggle(label, key){
+    const b = add(label, () => { dbg[key] = !dbg[key]; });
+    toggles.push([b, label, key]);
+  }
+
+  addToggle('Invencible', 'god');
+  addToggle('Velocidad x2', 'fast');
+  add('+1 vida', () => { if(live()) game.lives = Math.min(5, game.lives + 1); });
+  add('Escudo', () => { if(live()) player.shield = 1; });
+  add('Bombas al máx.', () => { if(live()) player.bombs = 5; });
+  add('Potencia máx.', () => { if(live()) player.power = 4; });
+  add('Matar enemigos', () => {
+    if(!live()) return;
+    for(const e of enemies.slice()) damageEnemy(e, 99999);
+  });
+  add('Matar jefe', () => {
+    if(!live()) return;
+    for(const e of enemies.slice()) if(e.isBoss) damageEnemy(e, 99999);
+  });
+  add('Limpiar balas', () => { ebullets.length = 0; });
+  add('Invocar jefe', () => { if(live() && classicOnly()) spawnBoss(game.round); });
+  add('+1000 pts / +30 s', () => {
+    if(!live()) return;
+    if(game.mode === 'survival') game.survivalTime += 30;
+    else game.score += 1000;
+  }, true);
+  add('Siguiente ronda', () => { if(live() && classicOnly()) nextRound(); }, true);
+
+  const rw = document.createElement('div');
+  rw.className = 'rw';
+  const sel = document.createElement('select');
+  for(let i = 1; i <= TOTAL_ROUNDS; i++){
+    const o = document.createElement('option');
+    o.value = String(i);
+    o.textContent = 'Ronda ' + i;
+    sel.appendChild(o);
+  }
+  const go = document.createElement('button');
+  go.type = 'button';
+  go.textContent = 'Ir a ronda';
+  go.addEventListener('click', () => {
+    if(live() && classicOnly()){
+      game.round = parseInt(sel.value, 10) - 1;
+      nextRound();
+    }
+    go.blur();
+    dbg.refresh();
+  });
+  rw.append(sel, go);
+  grid.appendChild(rw);
+
+  add('Cerrar', () => dbgClose(), true);
+
+  dbg.refresh = () => {
+    for(const [b, label, key] of toggles){
+      b.classList.toggle('on', !!dbg[key]);
+      b.textContent = label + (dbg[key] ? ': ON' : ': OFF');
+    }
+    info.textContent = live()
+      ? (game.mode === 'survival' ? 'SUPERVIVENCIA' : 'CLÁSICO · RONDA ' + game.round) +
+        ' · VIDAS ' + game.lives
+      : 'SIN PARTIDA EN CURSO';
+  };
+
+  document.body.appendChild(root);
+  dbg.el = root;
+}
+
+function dbgOpen(){
+  if(!dbg.el) dbgBuild();
+  dbg.open = true;
+  dbg.resume = (game.state === 'playing');
+  if(dbg.resume){
+    game.state = 'paused';
+    if(game.mode === 'survival') bgmPause();
+  }
+  for(const k in keys) keys[k] = false;
+  pointer.active = false;
+  pointer.down = false;
+  joyReset();
+  dbg.el.style.display = 'flex';
+  dbg.refresh();
+}
+
+function dbgClose(){
+  if(!dbg.el) return;
+  dbg.open = false;
+  dbg.el.style.display = 'none';
+  if(document.activeElement && document.activeElement.blur) document.activeElement.blur();
+  if(dbg.resume && game.state === 'paused'){
+    game.state = 'playing';
+    if(game.mode === 'survival') bgmResume();
+  }
+  dbg.resume = false;
+}
+
+window.addEventListener('keydown', e => {
+  if(e.code === 'F9'){
+    e.preventDefault();
+    e.stopImmediatePropagation();
+    if(!e.repeat) (dbg.open ? dbgClose() : dbgOpen());
+    return;
+  }
+  if(dbg.open){
+    e.stopImmediatePropagation();
+    if(e.code === 'Escape') dbgClose();
+  }
+}, true);
+
 })();
 </script>
 <!-- =========================================================
