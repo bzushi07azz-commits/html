@@ -2081,7 +2081,7 @@ function dbgBuild(){
       b.textContent = label + (dbg[key] ? ': ON' : ': OFF');
     }
     info.textContent = live()
-      ? (game.mode === 'survival' ? 'SUPERVIVENCIA' : 'CLÁSICO · RONDA ' + game.round) +
+      ? (game.mode === 'survival' ? 'SUPERVIVENCIA' : game.mode === 'sim' ? 'SIMULADOR' : 'CLÁSICO · RONDA ' + game.round) +
         ' · VIDAS ' + game.lives
       : 'SIN PARTIDA EN CURSO';
   };
@@ -2129,6 +2129,781 @@ window.addEventListener('keydown', e => {
     e.stopImmediatePropagation();
     if(e.code === 'Escape') dbgClose();
   }
+}, true);
+
+/* =========================================================
+   21. SIMULADOR DE PELEAS
+   (modo aparte: no toca JUGAR ni SUPERVIVENCIA)
+   ========================================================= */
+const SIM_KEY = 'novaSimCfg';
+const SIM_ENEMIES = [
+  ['drone',   'DRON',    'zigzag, baja rápido'],
+  ['shooter', 'TIRADOR', 'se queda y dispara'],
+  ['dart',    'DARDO',   'te persigue veloz'],
+  ['tank',    'TANQUE',  'aguanta y dispara triple']
+];
+const SIM_HARD = ['nemesis', 'eclipse', 'apocalipsis'];
+const SIM_PHASES = { nemesis: 3, eclipse: 3, apocalipsis: 4 };
+const SIM_BEAM_COL = { nemesis: '#ff2d55', eclipse: '#9b7bff', apocalipsis: '#ffb020' };
+
+BOSS_DEFS.nemesis     = { name: 'NÉMESIS',     core: '#ff2d55' };
+BOSS_DEFS.eclipse     = { name: 'ECLIPSE',     core: '#9b7bff' };
+BOSS_DEFS.apocalipsis = { name: 'APOCALIPSIS', core: '#ffffff' };
+
+const simDefault = () => ({
+  enemies: { drone: 6, shooter: 0, dart: 0, tank: 0 },
+  respawn: false, eLevel: 1,
+  bosses: [], bLevel: 5, bHp: 'normal',
+  lives: 3, power: 2
+});
+let simCfg = simDefault();
+try {
+  const s = JSON.parse(localStorage.getItem(SIM_KEY) || 'null');
+  if(s && typeof s === 'object'){
+    const d = simDefault();
+    simCfg = Object.assign(d, s, { enemies: Object.assign(d.enemies, s.enemies || {}) });
+  }
+} catch(e){}
+simCfg.bosses = (Array.isArray(simCfg.bosses) ? simCfg.bosses : [])
+  .filter(id => BOSS_DEFS[id]).slice(0, 4);
+function simSave(){ try { localStorage.setItem(SIM_KEY, JSON.stringify(simCfg)); } catch(e){} }
+
+const sim = { queue: [], spawnT: 0, rt: {}, kills: 0, hits: 0, time: 0, doneT: 0, token: 0 };
+let simBeams = [];
+
+/* ---------- Rayos con aviso ---------- */
+function simBeam(o, warn, e){
+  simBeams.push(Object.assign({
+    t: 0, warn: warn || 1, dur: 0.55, w: 34,
+    color: (e && SIM_BEAM_COL[e.bossType]) || '#ff4b6e', fired: false
+  }, o));
+}
+function simBeamsUpdate(dt){
+  let fired = 0;
+  for(let i = simBeams.length - 1; i >= 0; i--){
+    const b = simBeams[i];
+    b.t += dt;
+    if(!b.fired && b.t >= b.warn){ b.fired = true; fired++; }
+    if(b.t >= b.warn + b.dur){ simBeams.splice(i, 1); continue; }
+    if(b.fired && b.t > b.warn + 0.04 && b.t < b.warn + b.dur - 0.05 && player){
+      const dist = Math.abs((player.x - b.x) * Math.sin(b.a) - (player.y - b.y) * Math.cos(b.a));
+      if(dist < b.w / 2 + 5) hitPlayer();
+    }
+  }
+  if(fired){ noiseBurst(0.22, 0.09); game.shake = Math.max(game.shake, 5); }
+}
+function simDrawBeams(){
+  for(const b of simBeams){
+    const dx = Math.cos(b.a) * 1700, dy = Math.sin(b.a) * 1700;
+    ctx.save();
+    ctx.beginPath();
+    ctx.moveTo(b.x - dx, b.y - dy);
+    ctx.lineTo(b.x + dx, b.y + dy);
+    if(b.t < b.warn){
+      const k = b.t / b.warn;
+      ctx.globalAlpha = 0.07 + 0.12 * k;
+      ctx.strokeStyle = b.color; ctx.lineWidth = b.w; ctx.stroke();
+      ctx.globalAlpha = 0.3 + 0.5 * Math.abs(Math.sin(b.t * (9 + k * 20)));
+      ctx.lineWidth = 2; ctx.setLineDash([14, 10]); ctx.stroke();
+    } else {
+      const k = 1 - (b.t - b.warn) / b.dur;
+      ctx.globalCompositeOperation = 'lighter';
+      ctx.shadowColor = b.color; ctx.shadowBlur = 26;
+      ctx.globalAlpha = 0.5 + 0.5 * k;
+      ctx.strokeStyle = b.color; ctx.lineWidth = b.w; ctx.stroke();
+      ctx.lineWidth = b.w * 0.38; ctx.strokeStyle = '#ffffff'; ctx.stroke();
+    }
+    ctx.restore();
+  }
+}
+
+/* ---------- Primitivas de ataque de los jefes nuevos ---------- */
+const simAngDist = (a, c) => Math.abs(Math.atan2(Math.sin(a - c), Math.cos(a - c)));
+const simHpFrac  = e => clamp(e.hp / e.maxHp, 0, 1);
+const simRound   = e => e.round || 1;
+function simLater(e, d, fn){ (e.sq || (e.sq = [])).push({ t: d, fn }); }
+function simLaterTick(e, dt){
+  if(!e.sq) return;
+  for(let i = e.sq.length - 1; i >= 0; i--){
+    const s = e.sq[i];
+    s.t -= dt;
+    if(s.t <= 0){ e.sq.splice(i, 1); s.fn(); }
+  }
+}
+
+// Anillos con hueco que se desplaza: hay que ir "tejiendo"
+function hzGapRings(e, count, gapW, step){
+  const bs = bossSpd(e) * 0.85;
+  const base = player ? Math.atan2(player.y - e.y, player.x - e.x) : Math.PI / 2;
+  const side = Math.random() < 0.5 ? -1 : 1;
+  for(let k = 0; k < count; k++){
+    simLater(e, k * (step || 0.5), () => {
+      const n = 30, c = base + side * (0.7 + k * 0.45);
+      for(let i = 0; i < n; i++){
+        const a = (i / n) * TAU + 0.05 * k;
+        if(simAngDist(a, c) < gapW / 2) continue;
+        eBullet(e.x, e.y, Math.cos(a) * bs, Math.sin(a) * bs, '#ff5f7e', 5);
+      }
+      sfx(180, 0.12, 'sawtooth', 0.04, -90);
+    });
+  }
+}
+// Abanicos apuntados
+function hzFan(e, bursts, count, spread){
+  const bs = bossSpd(e) * 1.25;
+  for(let k = 0; k < bursts; k++){
+    simLater(e, k * 0.22, () => {
+      if(!player) return;
+      const a0 = Math.atan2(player.y - e.y, player.x - e.x), h = (count - 1) / 2;
+      for(let j = 0; j < count; j++){
+        const a = a0 + (j - h) * spread;
+        eBullet(e.x, e.y, Math.cos(a) * bs, Math.sin(a) * bs, '#ffd166', 5);
+      }
+      sfx(240, 0.08, 'sawtooth', 0.035, -100);
+    });
+  }
+}
+// Espiral de N brazos (opcional: invierte el giro a mitad)
+function hzSpiral(e, arms, dur, dir, flip){
+  const bs = bossSpd(e) * 0.78, step = 0.055, ticks = Math.floor(dur / step);
+  let off = rand(0, TAU), d = dir;
+  for(let k = 0; k < ticks; k++){
+    simLater(e, k * step, () => {
+      if(flip && k === (ticks >> 1)) d = -d;
+      off += d * 0.21;
+      for(let i = 0; i < arms; i++){
+        const a = off + (i / arms) * TAU;
+        eBullet(e.x, e.y, Math.cos(a) * bs, Math.sin(a) * bs, '#ff7a9a', 4.5);
+      }
+      if(k % 7 === 0) sfx(210, 0.05, 'sawtooth', 0.02, -60);
+    });
+  }
+}
+// Murallas con hueco que cambia de sitio en cada fila
+function hzWalls(e, gapCols, rows, gapT){
+  const cs = 34, cols = Math.floor(W / cs), vy = 125 + simRound(e) * 5;
+  let g = clamp(Math.round(((player ? player.x : W / 2) + rand(-130, 130)) / cs - gapCols / 2), 1, cols - gapCols - 1);
+  for(let r = 0; r < rows; r++){
+    simLater(e, r * gapT, () => {
+      for(let c = 0; c < cols; c++){
+        if(c >= g && c < g + gapCols) continue;
+        eBullet(cs / 2 + c * cs, e.y + e.r * 0.6, 0, vy, '#ff4b6e', 5);
+      }
+      sfx(150, 0.18, 'sawtooth', 0.05, -60);
+      g = clamp(g + (Math.random() < 0.5 ? -1 : 1) * randInt(2, 4), 1, cols - gapCols - 1);
+    });
+  }
+}
+// "Peine" de rayos: casi toda la pantalla, con un solo carril libre cerca de ti
+function hzComb(e, vertical, warn, omitN){
+  const n = vertical ? 8 : 12, base = vertical ? 30 : 40;
+  const pl = player ? (vertical ? player.x : player.y) : base;
+  const cur = clamp(Math.round((pl - base) / 60), 0, n - 1);
+  const o = clamp(cur + [-2, -1, 1, 2][randInt(0, 3)], 0, n - omitN);
+  for(let i = 0; i < n; i++){
+    if(i >= o && i < o + omitN) continue;
+    const p = base + i * 60;
+    simBeam(vertical ? { x: p, y: 0, a: Math.PI / 2, w: 56 } : { x: 0, y: p, a: 0, w: 56 }, warn + i * 0.03, e);
+  }
+  sfx(260, 0.45, 'sawtooth', 0.05, 220);
+}
+// Cruz (o X) de rayos sobre tu posición actual
+function hzCross(e, diag, warn){
+  if(!player) return;
+  const px = player.x, py = player.y;
+  simBeam({ x: px, y: 0, a: Math.PI / 2, w: 30 }, warn, e);
+  simBeam({ x: 0, y: py, a: 0, w: 30 }, warn, e);
+  if(diag){
+    simBeam({ x: px, y: py, a: Math.PI / 4,  w: 30 }, warn, e);
+    simBeam({ x: px, y: py, a: -Math.PI / 4, w: 30 }, warn, e);
+  }
+  sfx(300, 0.4, 'sawtooth', 0.045, 200);
+}
+// Cerco: anillo de balas que se cierra sobre ti, con una salida
+function hzEnclose(e, arriveT){
+  if(!player) return;
+  const cx = player.x, cy = player.y, R0 = 260, n = 40, sp = R0 / arriveT;
+  const gapC = rand(0, TAU);
+  rings.push({ x: cx, y: cy, r: 8, max: 90, life: 0.6, maxLife: 0.6, color: '#b48bff', width: 4 });
+  for(let i = 0; i < n; i++){
+    const a = (i / n) * TAU;
+    if(simAngDist(a, gapC) < 0.4) continue;
+    eBullet(cx + Math.cos(a) * R0, cy + Math.sin(a) * R0, -Math.cos(a) * sp, -Math.sin(a) * sp, '#b48bff', 5.5);
+  }
+  sfx(140, 0.5, 'sawtooth', 0.06, 160);
+}
+function simPhaseChange(e, ph){
+  e.ph = ph;
+  ebullets.length = 0;
+  simBeams.length = 0;
+  if(e.sq) e.sq.length = 0;
+  const col = BOSS_DEFS[e.bossType].core;
+  rings.push({ x: e.x, y: e.y, r: 10, max: 380, life: 0.8, maxLife: 0.8, color: col, width: 6 });
+  game.shake = Math.max(game.shake, 16);
+  game.flash = Math.max(game.flash, 0.35);
+  addText(e.x, e.y + e.r + 22, '¡FASE ' + ph + '!', col);
+  sfx(90, 0.5, 'sawtooth', 0.1, -40);
+  noiseBurst(0.4, 0.14);
+}
+
+/* ---------- NÉMESIS: 3 fases, patrones precisos ---------- */
+BOSS_AI.nemesis = function(e, dt){
+  simLaterTick(e, dt);
+  const f = simHpFrac(e), ph = f > 0.66 ? 1 : (f > 0.33 ? 2 : 3);
+  if(e.ph === undefined){ e.ph = ph; e.seq = 0; e.attackTimer = 1.0; }
+  else if(e.ph !== ph){ simPhaseChange(e, ph); e.seq = 0; e.attackTimer = 1.8; }
+  bossSway(e, dt, [0, 55, 85, 115][ph], 0.9 + ph * 0.12);
+  e.attackTimer -= dt;
+  if(e.attackTimer > 0) return;
+  const s = e.seq++;
+  if(ph === 1){
+    switch(s % 3){
+      case 0: hzGapRings(e, 3, 0.6, 0.55); e.attackTimer = 2.7; break;
+      case 1: hzFan(e, 3, 5, 0.17);        e.attackTimer = 1.8; break;
+      default: hzSpiral(e, 2, 1.6, 1, false); e.attackTimer = 2.4;
+    }
+  } else if(ph === 2){
+    switch(s % 3){
+      case 0: hzWalls(e, 3, 2, 0.8); e.attackTimer = 2.7; break;
+      case 1: hzCross(e, false, 1.0); simLater(e, 0.6, () => hzCross(e, false, 0.9)); e.attackTimer = 2.4; break;
+      default: hzSpiral(e, 3, 1.8, 1, false); simLater(e, 1.2, () => hzFan(e, 2, 5, 0.17)); e.attackTimer = 2.6;
+    }
+  } else {
+    switch(s % 4){
+      case 0: hzWalls(e, 3, 3, 0.7); simLater(e, 1.0, () => hzFan(e, 3, 7, 0.14)); e.attackTimer = 3.0; break;
+      case 1: hzComb(e, true, 1.1, 1); e.attackTimer = 2.2; break;
+      case 2: hzSpiral(e, 4, 2.4, 1, true); hzCross(e, true, 1.1); e.attackTimer = 3.0; break;
+      default: hzGapRings(e, 4, 0.55, 0.4); simLater(e, 1.0, () => hzEnclose(e, 2.0)); e.attackTimer = 3.0;
+    }
+  }
+};
+
+/* ---------- ECLIPSE: rayos con aviso, peines y cercos ---------- */
+BOSS_AI.eclipse = function(e, dt){
+  simLaterTick(e, dt);
+  const f = simHpFrac(e), ph = f > 0.6 ? 1 : (f > 0.3 ? 2 : 3);
+  if(e.ph === undefined){ e.ph = ph; e.seq = 0; e.attackTimer = 1.2; }
+  else if(e.ph !== ph){ simPhaseChange(e, ph); e.seq = 0; e.attackTimer = 1.8; }
+  bossSway(e, dt, 45 + ph * 15, 0.7);
+  e.attackTimer -= dt;
+  if(e.attackTimer > 0) return;
+  const s = e.seq++;
+  if(ph === 1){
+    switch(s % 3){
+      case 0: hzComb(e, true, 1.15, 1); break;
+      case 1: hzEnclose(e, 2.3); break;
+      default: hzComb(e, false, 1.15, 1);
+    }
+    e.attackTimer = 2.6;
+  } else if(ph === 2){
+    switch(s % 4){
+      case 0: hzComb(e, true, 1.1, 1); simLater(e, 0.9, () => hzFan(e, 3, 7, 0.15)); break;
+      case 1: hzCross(e, true, 1.0); simLater(e, 0.55, () => hzCross(e, true, 0.9)); break;
+      case 2: hzComb(e, false, 1.1, 1); hzEnclose(e, 1.9); break;
+      default: hzGapRings(e, 3, 0.55, 0.45); hzSpiral(e, 2, 1.6, 1, false);
+    }
+    e.attackTimer = 2.4;
+  } else {
+    switch(s % 4){
+      case 0: hzComb(e, true, 1.25, 1); hzComb(e, false, 1.25, 1); break;
+      case 1: hzCross(e, true, 1.0); hzEnclose(e, 2.0); break;
+      case 2: hzComb(e, true, 1.1, 1); hzSpiral(e, 3, 2.0, 1, true); break;
+      default: hzWalls(e, 3, 3, 0.7); simLater(e, 1.0, () => hzComb(e, false, 1.0, 1));
+    }
+    e.attackTimer = 2.4;
+  }
+};
+
+/* ---------- APOCALIPSIS: mezcla los patrones de todos + peligros extra ---------- */
+const APO_SUBS = ['spiral', 'sweeper', 'vortex', 'rain', 'sniper', 'walls', 'laser'];
+function apoOverlay(e, ph){
+  const r = randInt(0, 3);
+  const L = [
+    [() => hzComb(e, true, 1.3, 1), () => hzEnclose(e, 2.4), () => hzCross(e, false, 1.2)],
+    [() => hzComb(e, false, 1.2, 1), () => hzWalls(e, 3, 2, 0.9), () => hzCross(e, true, 1.1), () => hzGapRings(e, 3, 0.6, 0.5)],
+    [() => { hzComb(e, true, 1.2, 1); hzFan(e, 3, 5, 0.17); },
+     () => { hzCross(e, true, 1.1); hzEnclose(e, 2.0); },
+     () => { hzComb(e, false, 1.2, 1); hzGapRings(e, 3, 0.6, 0.5); },
+     () => { hzWalls(e, 3, 3, 0.75); simLater(e, 1.0, () => hzCross(e, false, 0.9)); }],
+    [() => { hzComb(e, true, 1.25, 1); hzComb(e, false, 1.25, 1); },
+     () => { hzCross(e, true, 1.0); hzEnclose(e, 1.9); hzGapRings(e, 2, 0.6, 0.5); },
+     () => { hzComb(e, true, 1.15, 1); hzSpiral(e, 3, 2.0, 1, true); },
+     () => { hzWalls(e, 3, 3, 0.7); hzComb(e, false, 1.1, 1); }]
+  ][ph - 1];
+  L[r % L.length]();
+}
+BOSS_AI.apocalipsis = function(e, dt){
+  simLaterTick(e, dt);
+  const f = simHpFrac(e), ph = f > 0.75 ? 1 : (f > 0.5 ? 2 : (f > 0.25 ? 3 : 4));
+  if(e.ph === undefined){ e.ph = ph; e.subI = -1; e.subT = 0; e.hzT = 4; }
+  else if(e.ph !== ph){ simPhaseChange(e, ph); e.subT = 0; e.hzT = 3; e.grace = 1.6; }
+  if(e.grace > 0){ e.grace -= dt; bossSway(e, dt, 30, 0.6); return; }
+  e.subT -= dt;
+  if(e.subT <= 0){
+    e.subI = (e.subI + 1) % APO_SUBS.length;
+    e.sub = APO_SUBS[e.subI];
+    e.subT = [0, 7, 5.5, 4.5, 3.8][ph];
+    e.attackTimer = 0.5; e.patternIndex = 0; e.cd = undefined; e.burst = 0;
+    addText(e.x, e.y + e.r + 18, '¡' + BOSS_DEFS[e.sub].name + '!', BOSS_DEFS[e.sub].core);
+  }
+  BOSS_AI[e.sub](e, dt);
+  e.hzT -= dt;
+  if(e.hzT <= 0){ apoOverlay(e, ph); e.hzT = [0, 6, 4.8, 3.8, 3][ph]; }
+};
+
+/* ---------- Ciclo del simulador ---------- */
+function simSpawnEnemy(type){
+  const def = ENEMY_DEFS[type], t = (simCfg.eLevel - 1) * 48;
+  const hp = Math.ceil(def.hp * (1 + (simCfg.eLevel - 1) * 0.55));
+  enemies.push({
+    type, x: rand(44, W - 44), y: -46, r: def.r, hp, maxHp: hp,
+    speed: def.speed * (1 + t * 0.0012), score: def.score, color: def.color,
+    t: 0, phase: rand(0, TAU), fireTimer: rand(0.9, 2.0), targetY: rand(105, 205),
+    flash: 0, dead: false
+  });
+}
+function simSpawnBoss(id, i, n){
+  spawnBoss(simCfg.bLevel, id, false);
+  texts.pop();                                  // quita el "¡JEFE — RONDA n!" del modo clásico
+  const b = enemies[enemies.length - 1];
+  const mult = { nemesis: 1.6, eclipse: 1.6, apocalipsis: 2.5 }[id] || 1;
+  let hp = Math.round(b.maxHp * mult * (simCfg.bHp === 'x3' ? 3 : 1));
+  if(simCfg.bHp === 'inf') hp = 999999;
+  b.hp = b.maxHp = hp;
+  b.inf = simCfg.bHp === 'inf';
+  b.x = W * (i + 1) / (n + 1);
+  b.color = id === 'apocalipsis' ? '#ff7ad9' : BOSS_DEFS[id].core;
+  addText(W / 2, 180 + i * 22, '¡' + BOSS_DEFS[id].name + '!', BOSS_DEFS[id].core);
+}
+
+function simStart(){
+  simSave();
+  ensureAudio();
+  game.mode = 'sim';
+  player = makePlayer();
+  player.power = simCfg.power;
+  bullets.length = 0; ebullets.length = 0; enemies.length = 0;
+  powerups.length = 0; particles.length = 0; rings.length = 0; texts.length = 0;
+  simBeams.length = 0;
+  game.state = 'playing';
+  game.score = 0; game.time = 0; game.shake = 0; game.flash = 0;
+  game.lives = simCfg.lives === 0 ? 99 : simCfg.lives;
+  game.round = 1; game.roundTime = 0; game.survivalTime = 0;
+  game.bossActive = false; game.bossDefeated = false;
+  bgmStop();
+  pointer.active = false; pointer.down = false; joyReset();
+  hideAll();
+  simUI.setup.classList.add('hidden');
+  simUI.result.classList.add('hidden');
+  setTouchUI(true);
+
+  sim.token++;
+  sim.kills = 0; sim.hits = 0; sim.time = 0; sim.doneT = 0;
+  sim.spawnT = 0.7; sim.rt = {}; sim.queue = [];
+  for(const [t] of SIM_ENEMIES){
+    for(let k = 0; k < (simCfg.enemies[t] || 0); k++) sim.queue.push(t);
+  }
+  for(let i = sim.queue.length - 1; i > 0; i--){
+    const j = randInt(0, i); [sim.queue[i], sim.queue[j]] = [sim.queue[j], sim.queue[i]];
+  }
+  const list = simCfg.bosses.slice(0, 4);
+  list.forEach((id, i) => simSpawnBoss(id, i, list.length));
+  addText(W / 2, H / 2, '¡COMBATE!', '#4be1ff');
+}
+
+function simCheckEnd(dt){
+  const hasBoss   = simCfg.bosses.length > 0;
+  const bossAlive = enemies.some(e => e.isBoss && !e.dead);
+  const foesAlive = enemies.some(e => !e.isBoss && !e.dead);
+  let done;
+  if(hasBoss) done = !bossAlive && (simCfg.respawn || (!foesAlive && sim.queue.length === 0));
+  else        done = !simCfg.respawn && !foesAlive && sim.queue.length === 0;
+  if(!done){ sim.doneT = 0; return; }
+  sim.doneT += dt;
+  if(sim.doneT > 1.4) simFinish(true);
+}
+
+function simUpdate(dt){
+  updateStars(dt);
+  if(game.shake > 0) game.shake = Math.max(0, game.shake - dt * 46);
+  if(game.flash > 0) game.flash = Math.max(0, game.flash - dt * 2.6);
+  if(game.state === 'simover'){ updateParticles(dt); return; }
+  if(game.state !== 'playing') return;
+
+  game.time += dt;
+  sim.time  += dt;
+  if(simCfg.lives === 0) game.lives = 99;
+
+  // aparición escalonada de los enemigos elegidos
+  sim.spawnT -= dt;
+  if(sim.spawnT <= 0 && sim.queue.length && enemies.length < 60){
+    simSpawnEnemy(sim.queue.shift());
+    sim.spawnT = 0.14;
+  }
+  // reaparición (mantiene la cantidad elegida en pantalla)
+  if(simCfg.respawn){
+    for(const [t] of SIM_ENEMIES){
+      const want = simCfg.enemies[t] || 0;
+      if(!want) continue;
+      sim.rt[t] = (sim.rt[t] || 0) - dt;
+      const have = enemies.filter(e => e.type === t && !e.dead).length + sim.queue.filter(x => x === t).length;
+      if(have < want && sim.rt[t] <= 0){ sim.queue.push(t); sim.rt[t] = 0.9; }
+    }
+  }
+
+  updatePlayer(dt);
+  updateBullets(dt);
+  updateEnemies(dt);
+  updateEBullets(dt);
+  simBeamsUpdate(dt);
+  updatePowerups(dt);
+  updateParticles(dt);
+  checkCollisions();
+  if(game.state === 'playing') simCheckEnd(dt);
+}
+
+function simFinish(win){
+  if(game.state !== 'playing') return;
+  game.state = 'simover';
+  setTouchUI(false);
+  const tok = sim.token;
+  const t = sim.time, mm = Math.floor(t / 60), ss = Math.floor(t % 60);
+  const r = simUI.result;
+  const title = r.querySelector('#simResTitle');
+  title.textContent = win ? '¡VICTORIA!' : 'NAVE DESTRUIDA';
+  title.style.color = win ? '#6bff9e' : '#ff6b9d';
+  title.style.textShadow = win ? '0 0 22px rgba(107,255,158,.75)' : '0 0 22px rgba(255,107,157,.75)';
+  r.querySelector('#srTime').textContent  = mm + ':' + String(ss).padStart(2, '0');
+  r.querySelector('#srKills').textContent = sim.kills;
+  r.querySelector('#srHits').textContent  = sim.hits;
+  if(win){ game.flash = 0.8; noiseBurst(0.6, 0.18); }
+  else {
+    explode(player.x, player.y, '#ff8a5c', 44, 2);
+    game.shake = 24; noiseBurst(0.7, 0.25);
+  }
+  setTimeout(() => {
+    if(sim.token === tok && game.state === 'simover') r.classList.remove('hidden');
+  }, win ? 500 : 1000);
+}
+
+/* ---------- Conexión con el juego original (sin editar sus funciones) ---------- */
+const _simUpdate0 = update;
+update = function(dt){ if(game.mode === 'sim') simUpdate(dt); else _simUpdate0(dt); };
+
+const _simSpawner0 = updateSpawner;
+updateSpawner = function(dt){ if(game.mode === 'sim') return; _simSpawner0(dt); };
+
+const _simGameOver0 = gameOver;
+gameOver = function(){ if(game.mode === 'sim') simFinish(false); else _simGameOver0(); };
+
+const _simDamage0 = damageEnemy;
+damageEnemy = function(e, dmg){
+  const was = e.dead;
+  _simDamage0(e, dmg);
+  if(game.mode === 'sim' && !was && e.dead) sim.kills++;
+};
+
+const _simHit0 = hitPlayer;
+hitPlayer = function(){
+  if(game.mode !== 'sim' || !player) return _simHit0();
+  const was = player.invuln > 0;
+  _simHit0();
+  if(!was && (player.invuln > 0 || game.state !== 'playing')) sim.hits++;
+};
+
+const _simEffects0 = drawEffects;
+drawEffects = function(){ _simEffects0(); if(game.mode === 'sim') simDrawBeams(); };
+
+const _simHUD0 = drawHUD;
+drawHUD = function(){ if(game.mode === 'sim') simDrawHUD(); else _simHUD0(); };
+
+function simDrawHUD(){
+  ctx.save();
+  ctx.textBaseline = 'top';
+  const t = sim.time, mm = Math.floor(t / 60), ss = Math.floor(t % 60);
+  ctx.font = 'bold 22px ui-monospace, monospace';
+  ctx.textAlign = 'left';
+  ctx.fillStyle = '#4be1ff'; ctx.shadowColor = '#4be1ff'; ctx.shadowBlur = 14;
+  ctx.fillText(mm + ':' + String(ss).padStart(2, '0'), 16, 14);
+  ctx.shadowBlur = 0;
+  ctx.font = '11px ui-monospace, monospace';
+  ctx.fillStyle = 'rgba(160,190,220,0.8)';
+  ctx.fillText('SIMULADOR', 16, 42);
+  ctx.fillText('DERROTADOS ' + sim.kills, 16, 58);
+  const left = enemies.filter(e => !e.isBoss && !e.dead).length + sim.queue.length;
+  ctx.fillText(simCfg.respawn ? 'ENEMIGOS ∞' : 'ENEMIGOS ' + left, 16, 74);
+
+  // vidas
+  const shown = simCfg.lives === 0 ? 1 : Math.min(game.lives, 5);
+  for(let i = 0; i < shown; i++){
+    ctx.save();
+    ctx.translate(W - 22 - i * 22, 24);
+    ctx.beginPath();
+    ctx.moveTo(0, -8); ctx.lineTo(7, 7); ctx.lineTo(0, 3); ctx.lineTo(-7, 7);
+    ctx.closePath();
+    ctx.fillStyle = '#ff6b9d'; ctx.shadowColor = '#ff6b9d'; ctx.shadowBlur = 12;
+    ctx.fill();
+    ctx.restore();
+  }
+  if(simCfg.lives === 0){
+    ctx.textAlign = 'right';
+    ctx.font = 'bold 18px ui-monospace, monospace';
+    ctx.fillStyle = '#ff6b9d';
+    ctx.fillText('∞', W - 38, 14);
+  }
+  // bombas
+  ctx.shadowBlur = 0;
+  ctx.textAlign = 'right';
+  ctx.font = '11px ui-monospace, monospace';
+  ctx.fillStyle = 'rgba(255,209,102,0.9)';
+  ctx.fillText('BOMBAS', W - 16, 44);
+  for(let i = 0; i < (player ? player.bombs : 0); i++){
+    ctx.beginPath();
+    ctx.arc(W - 22 - i * 15, 68, 4.5, 0, TAU);
+    ctx.fillStyle = '#ffd166'; ctx.shadowColor = '#ffd166'; ctx.shadowBlur = 10;
+    ctx.fill();
+  }
+  // potencia
+  if(player){
+    ctx.shadowBlur = 0;
+    ctx.textAlign = 'left';
+    ctx.fillStyle = 'rgba(120,220,255,0.8)';
+    ctx.font = '11px ui-monospace, monospace';
+    ctx.fillText('POT', 16, H - 26);
+    for(let i = 0; i < 4; i++){
+      ctx.fillStyle = i < player.power ? '#4be1ff' : 'rgba(75,225,255,0.18)';
+      ctx.fillRect(48 + i * 16, H - 24, 12, 8);
+    }
+  }
+  // barras de jefe (una por jefe vivo)
+  const bosses = enemies.filter(e => e.isBoss && !e.dead);
+  bosses.forEach((b, i) => {
+    const hp = clamp(b.hp / b.maxHp, 0, 1), barW = W - 80, barX = 40, barY = 106 + i * 30;
+    const col = (BOSS_DEFS[b.bossType] || {}).core || '#ff4bd8';
+    ctx.shadowBlur = 0;
+    ctx.fillStyle = 'rgba(0,0,0,0.6)';
+    ctx.fillRect(barX, barY, barW, 8);
+    const grad = ctx.createLinearGradient(barX, 0, barX + barW, 0);
+    grad.addColorStop(0, col);
+    grad.addColorStop(1, '#ffd166');
+    ctx.fillStyle = grad; ctx.shadowColor = col; ctx.shadowBlur = 14;
+    ctx.fillRect(barX, barY, barW * hp, 8);
+    ctx.shadowBlur = 0;
+    ctx.font = 'bold 9px ui-monospace, monospace';
+    ctx.textAlign = 'center';
+    ctx.fillStyle = col;
+    let label = (BOSS_DEFS[b.bossType] || {}).name || 'JEFE';
+    if(SIM_PHASES[b.bossType] && b.ph) label += ' · FASE ' + b.ph + '/' + SIM_PHASES[b.bossType];
+    label += b.inf ? ' · ∞' : ' · ' + Math.ceil(hp * 100) + '%';
+    ctx.fillText(label, W / 2, barY - 11);
+  });
+  ctx.restore();
+  syncBombCount();
+}
+
+/* ---------- Interfaz: menú de configuración y resultado ---------- */
+const simUI = (() => {
+  const st = document.createElement('style');
+  st.textContent = `
+    .sim-ov{position:absolute;inset:0;z-index:21;display:flex;flex-direction:column;padding:14px;overflow-y:auto;
+      background:rgba(4,4,14,.96);backdrop-filter:blur(9px);-webkit-backdrop-filter:blur(9px);
+      border-radius:12px;line-height:1.4;text-align:center;touch-action:pan-y}
+    .sim-ov.hidden{display:none}
+    .sim-box{margin:auto;width:100%;max-width:410px;display:flex;flex-direction:column;gap:9px}
+    .sim-title{font-size:20px;letter-spacing:.16em;font-weight:800;color:#6bff9e;text-shadow:0 0 18px rgba(107,255,158,.6)}
+    .sim-sub{font-size:11px;letter-spacing:.12em;color:#8fa8c4;margin-top:-4px}
+    .sim-card{border:1px solid rgba(75,225,255,.16);background:rgba(75,225,255,.04);border-radius:12px;
+      padding:10px 12px;display:flex;flex-direction:column;gap:7px;text-align:left}
+    .sim-h{font-size:10.5px;letter-spacing:.24em;color:#7fd3ff;font-weight:800}
+    .sim-h small{letter-spacing:.06em;color:#8fa8c4;font-weight:600}
+    .sim-row{display:flex;align-items:center;justify-content:space-between;gap:8px}
+    .sim-l{font-size:11.5px;color:#c8dcf0;letter-spacing:.04em;flex:1}
+    .sim-l i{display:block;font-style:normal;font-size:9.5px;color:#7f93ab;letter-spacing:.02em}
+    .sim-dot{width:9px;height:9px;border-radius:50%;display:inline-block;margin-right:7px;background:currentColor;box-shadow:0 0 8px currentColor}
+    .sim-step{display:flex;align-items:center;gap:5px}
+    .sim-step b{min-width:28px;text-align:center;font-size:14px;color:#ffd166;font-family:ui-monospace,monospace}
+    .sim-step button,.sim-seg button,.sim-chip,.sim-mini{font:inherit;cursor:pointer;font-weight:700;
+      color:#9adcff;background:rgba(75,225,255,.08);border:1px solid rgba(75,225,255,.32)}
+    .sim-step button{min-width:32px;height:30px;border-radius:8px;font-size:15px}
+    .sim-seg{display:flex;border-radius:999px;overflow:hidden;border:1px solid rgba(75,225,255,.3)}
+    .sim-seg button{border:none;border-radius:0;font-size:10.5px;letter-spacing:.05em;padding:7px 11px;background:transparent}
+    .sim-seg button.on{background:#4be1ff;color:#04101a}
+    .sim-chips{display:flex;flex-wrap:wrap;gap:6px}
+    .sim-chip{font-size:10.5px;letter-spacing:.05em;padding:7px 10px;border-radius:999px}
+    .sim-chip.on{background:#4be1ff;color:#04101a;border-color:transparent}
+    .sim-chip.hard{color:#ff9bb0;border-color:rgba(255,75,110,.5);background:rgba(255,75,110,.08)}
+    .sim-chip.hard.on{background:#ff4b6e;color:#fff}
+    .sim-mini{font-size:11px;letter-spacing:.1em;padding:9px 16px;border-radius:999px}
+    .sim-acts{display:flex;gap:8px;justify-content:center}
+    .sim-sum{font-size:11.5px;letter-spacing:.04em;color:#ffd166;min-height:18px}
+    .sim-stats{display:flex;gap:18px;justify-content:center;font-size:11px;letter-spacing:.1em;color:#8fa8c4}
+    .sim-stats b{display:block;font-size:20px;color:#ffd166;font-family:ui-monospace,monospace;letter-spacing:0}
+    #simGo[disabled]{opacity:.35;pointer-events:none}
+  `;
+  document.head.appendChild(st);
+
+  const wrapEl = document.getElementById('wrap');
+  const setup = document.createElement('div');
+  setup.className = 'sim-ov hidden';
+  setup.id = 'simSetup';
+  const enemyRows = SIM_ENEMIES.map(([id, name, desc]) => `
+    <div class="sim-row">
+      <span class="sim-l"><span class="sim-dot" style="color:${ENEMY_DEFS[id].color}"></span>${name}<i>${desc}</i></span>
+      <div class="sim-step">
+        <button data-en="${id}" data-d="-1">−</button><b data-enb="${id}">0</b>
+        <button data-en="${id}" data-d="1">+</button><button data-en="${id}" data-d="5">+5</button>
+      </div>
+    </div>`).join('');
+  const chip = (id, hard) => `<button class="sim-chip${hard ? ' hard' : ''}" data-boss="${id}">${hard ? '☠ ' : ''}${BOSS_DEFS[id].name}</button>`;
+  const seg = (key, opts) => `<div class="sim-seg" data-seg="${key}">${opts.map(([v, l]) => `<button data-v="${v}">${l}</button>`).join('')}</div>`;
+  const step = key => `<div class="sim-step"><button data-st="${key}" data-d="-1">−</button><b data-stb="${key}">1</b><button data-st="${key}" data-d="1">+</button></div>`;
+  setup.innerHTML = `
+    <div class="sim-box">
+      <div class="sim-title">⚔ SIMULADOR</div>
+      <div class="sim-sub">ELIGE QUIÉN APARECE EN EL COMBATE</div>
+      <div class="sim-card">
+        <div class="sim-h">ENEMIGOS</div>
+        ${enemyRows}
+        <div class="sim-row"><span class="sim-l">Reaparecen al morir</span>${seg('respawn', [['0', 'NO'], ['1', 'SÍ']])}</div>
+        <div class="sim-row"><span class="sim-l">Nivel de enemigos<i>más vida y velocidad</i></span>${step('eLevel')}</div>
+      </div>
+      <div class="sim-card">
+        <div class="sim-h">JEFES <small>(toca para elegir, máx. 4)</small></div>
+        <div class="sim-chips">${Object.keys(BOSS_DEFS).filter(id => !SIM_HARD.includes(id)).map(id => chip(id, false)).join('')}</div>
+        <div class="sim-h" style="color:#ff9bb0">☠ MUY DIFÍCILES <small>(solo en el simulador)</small></div>
+        <div class="sim-chips">${SIM_HARD.map(id => chip(id, true)).join('')}</div>
+        <div class="sim-row"><span class="sim-l">Nivel del jefe<i>más vida y balas más rápidas</i></span>${step('bLevel')}</div>
+        <div class="sim-row"><span class="sim-l">Vida del jefe<i>∞ = práctica de patrones</i></span>${seg('bHp', [['normal', 'NORMAL'], ['x3', 'x3'], ['inf', '∞']])}</div>
+      </div>
+      <div class="sim-card">
+        <div class="sim-h">TU NAVE</div>
+        <div class="sim-row"><span class="sim-l">Vidas</span>${seg('lives', [['1', '1'], ['3', '3'], ['5', '5'], ['0', '∞']])}</div>
+        <div class="sim-row"><span class="sim-l">Potencia de disparo</span>${seg('power', [['1', '1'], ['2', '2'], ['3', '3'], ['4', '4']])}</div>
+      </div>
+      <div class="sim-sum" id="simSum"></div>
+      <div class="sim-acts">
+        <button class="sim-mini" id="simClear">LIMPIAR</button>
+        <button class="sim-mini" id="simRandom">🎲 AL AZAR</button>
+      </div>
+      <button class="btn" id="simGo">▶ COMENZAR</button>
+      <div class="sim-acts"><button class="sim-mini" id="simBack">← VOLVER</button></div>
+    </div>`;
+  wrapEl.appendChild(setup);
+
+  const result = document.createElement('div');
+  result.className = 'overlay hidden';
+  result.id = 'simResult';
+  result.innerHTML = `
+    <h2 id="simResTitle">¡VICTORIA!</h2>
+    <div class="sim-stats">
+      <div>TIEMPO<b id="srTime">0:00</b></div>
+      <div>DERROTADOS<b id="srKills">0</b></div>
+      <div>GOLPES<b id="srHits">0</b></div>
+    </div>
+    <button class="btn" id="simAgain">↻ REPETIR</button>
+    <button class="btn alt" id="simCfgBtn">⚙ CONFIGURAR</button>
+    <button class="sim-mini" id="simMenuBtn">☰ MENÚ</button>`;
+  wrapEl.appendChild(result);
+
+  const btn = document.createElement('button');
+  btn.className = 'btn';
+  btn.id = 'btnSim';
+  btn.textContent = '⚔ SIMULADOR';
+  btn.style.background = 'linear-gradient(180deg,#b8ffcf,#2ee68a)';
+  btn.style.boxShadow = '0 0 26px rgba(46,230,138,.55),inset 0 -3px 0 rgba(0,0,0,.28)';
+  const after = document.getElementById('btnSurvival');
+  after.parentNode.insertBefore(btn, after.nextSibling);
+
+  return { setup, result, btn };
+})();
+
+function simSummaryText(){
+  const parts = [];
+  for(const [id, name] of SIM_ENEMIES){
+    const n = simCfg.enemies[id] || 0;
+    if(n) parts.push(n + ' ' + name);
+  }
+  const foes = parts.join(' · ');
+  const bs = simCfg.bosses.map(id => BOSS_DEFS[id].name).join(' + ');
+  if(!foes && !bs) return 'Elige al menos un enemigo o un jefe';
+  return [foes, bs ? 'JEFE: ' + bs : ''].filter(Boolean).join('  |  ');
+}
+function simRefreshUI(){
+  const s = simUI.setup;
+  for(const [id] of SIM_ENEMIES) s.querySelector('[data-enb="' + id + '"]').textContent = simCfg.enemies[id] || 0;
+  s.querySelector('[data-stb="eLevel"]').textContent = simCfg.eLevel;
+  s.querySelector('[data-stb="bLevel"]').textContent = simCfg.bLevel;
+  const segVal = { respawn: simCfg.respawn ? '1' : '0', bHp: simCfg.bHp, lives: String(simCfg.lives), power: String(simCfg.power) };
+  s.querySelectorAll('[data-seg]').forEach(g => {
+    g.querySelectorAll('button').forEach(b => b.classList.toggle('on', b.dataset.v === segVal[g.dataset.seg]));
+  });
+  s.querySelectorAll('[data-boss]').forEach(c => c.classList.toggle('on', simCfg.bosses.includes(c.dataset.boss)));
+  const total = Object.values(simCfg.enemies).reduce((a, b) => a + (b || 0), 0) + simCfg.bosses.length;
+  s.querySelector('#simSum').textContent = simSummaryText();
+  s.querySelector('#simGo').disabled = total === 0;
+}
+function simOpenSetup(){ simRefreshUI(); simUI.setup.classList.remove('hidden'); }
+function simCloseSetup(){ simUI.setup.classList.add('hidden'); }
+
+simUI.setup.addEventListener('click', ev => {
+  const b = ev.target.closest('button');
+  if(!b) return;
+  const d = b.dataset;
+  if(d.en){
+    simCfg.enemies[d.en] = clamp((simCfg.enemies[d.en] || 0) + parseInt(d.d, 10), 0, 25);
+  } else if(d.st){
+    simCfg[d.st] = clamp(simCfg[d.st] + parseInt(d.d, 10), 1, 10);
+  } else if(d.v !== undefined){
+    const key = b.parentNode.dataset.seg;
+    if(key === 'respawn') simCfg.respawn = d.v === '1';
+    else if(key === 'bHp') simCfg.bHp = d.v;
+    else simCfg[key] = parseInt(d.v, 10);
+  } else if(d.boss){
+    const i = simCfg.bosses.indexOf(d.boss);
+    if(i >= 0) simCfg.bosses.splice(i, 1);
+    else if(simCfg.bosses.length < 4) simCfg.bosses.push(d.boss);
+    else { simUI.setup.querySelector('#simSum').textContent = 'Máximo 4 jefes a la vez'; return; }
+  } else if(b.id === 'simClear'){
+    for(const [id] of SIM_ENEMIES) simCfg.enemies[id] = 0;
+    simCfg.bosses = [];
+  } else if(b.id === 'simRandom'){
+    for(const [id] of SIM_ENEMIES) simCfg.enemies[id] = 0;
+    const types = SIM_ENEMIES.map(x => x[0]).sort(() => Math.random() - 0.5).slice(0, randInt(2, 3));
+    for(const t of types) simCfg.enemies[t] = randInt(3, 14);
+    simCfg.eLevel = randInt(1, 6);
+    simCfg.bosses = [];
+  } else if(b.id === 'simGo'){
+    simStart();
+    return;
+  } else if(b.id === 'simBack'){
+    simSave(); simCloseSetup();
+    return;
+  } else return;
+  simSave();
+  simRefreshUI();
+});
+
+simUI.btn.addEventListener('click', () => { ensureAudio(); simOpenSetup(); });
+simUI.result.querySelector('#simAgain').addEventListener('click', simStart);
+simUI.result.querySelector('#simCfgBtn').addEventListener('click', () => {
+  simUI.result.classList.add('hidden');
+  game.state = 'menu';
+  elMenu.classList.remove('hidden');
+  setTouchUI(false);
+  simOpenSetup();
+});
+simUI.result.querySelector('#simMenuBtn').addEventListener('click', () => {
+  simUI.result.classList.add('hidden');
+  game.state = 'menu';
+  elMenu.classList.remove('hidden');
+  setTouchUI(false);
+});
+
+// Con el menú del simulador abierto, ESPACIO/ENTER no deben lanzar una partida clásica
+window.addEventListener('keydown', e => {
+  if(simUI.setup.classList.contains('hidden')) return;
+  if(e.code === 'Escape'){ e.stopImmediatePropagation(); simCloseSetup(); return; }
+  if(e.code === 'Space' || e.code === 'Enter') e.stopImmediatePropagation();
 }, true);
 
 })();
